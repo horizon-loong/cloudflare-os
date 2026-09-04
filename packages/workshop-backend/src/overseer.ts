@@ -11610,7 +11610,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let impl = this.impl;
     let metaSubscriber = {
       add(record: AiChatMetadata) {
-        subscriber.metadata(impl.chatMetaForClient(record)).catch(unsubscribe);
+        subscriber.metadata(impl.chatMetaForClient(record)).catch((e) => {
+          this.impl.logger.error("failed to push chat metadata to subscriber", {
+            event: "chat.push.metadata.failed", error: e,
+          });
+          unsubscribe();
+        });
       },
       update(oldRecord: AiChatMetadata, newRecord: AiChatMetadata): void {
         subscriber.metadata(impl.chatMetaForClient(newRecord)).catch(unsubscribe);
@@ -11622,7 +11627,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let self = this;
     function deliverMessage(record: AiChatMessage) {
-      subscriber.message(self.#getChatMessageForClient(record)).catch(unsubscribe);
+      subscriber.message(self.#getChatMessageForClient(record)).catch((e) => {
+        this.impl.logger.error("failed to push chat message to subscriber", {
+          event: "chat.push.message.failed", error: e,
+        });
+        unsubscribe();
+      });
     }
 
     let msgSubscriber = {
