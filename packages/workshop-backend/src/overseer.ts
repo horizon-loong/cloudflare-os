@@ -11610,7 +11610,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let impl = this.impl;
     let metaSubscriber = {
       add(record: AiChatMetadata) {
-        subscriber.metadata(impl.chatMetaForClient(record)).catch((e) => {
+        console.error("[dbg] metaSubscriber.add fired, chatId=", record.id);
+        let p = subscriber.metadata(impl.chatMetaForClient(record));
+        p.then(() => console.error("[dbg] metadata push RESOLVED"),
+               (e) => console.error("[dbg] metadata push REJECTED:", e?.message ?? e));
+        p.catch((e) => {
           this.impl.logger.error("failed to push chat metadata to subscriber", {
             event: "chat.push.metadata.failed", error: e,
           });
