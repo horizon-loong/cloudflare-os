@@ -1882,7 +1882,7 @@ class OverseerImpl implements AgentHooks {
     this.gitCache = new WorkspaceGitCache(this.storage, {
       pull: (gatekeeperId, oids, hints) => this.#pullGitObjects(gatekeeperId, oids, hints),
     });
-    this.users = this.ctx.exports.UserDurableObject;
+    this.users = this.env.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
 
     // Run any pending storage migration before anything else can touch storage. This must happen
@@ -8212,7 +8212,7 @@ class OverseerImpl implements AgentHooks {
     );
 
     if (isFeatured) {
-      await this.ctx.exports.AdminSettings.getByName("").syncFeaturedBlueprint({
+      await this.env.AdminSettings.getByName("").syncFeaturedBlueprint({
         id: record.id,
         metadata: record.metadata,
       });
@@ -8246,7 +8246,7 @@ class OverseerImpl implements AgentHooks {
 
     // Delete from User DO.
     let owner = this.users.get(this.users.idFromString(this.ownerId));
-    await this.ctx.exports.AdminSettings.getByName("").deleteFeaturedBlueprint(record.id);
+    await this.env.AdminSettings.getByName("").deleteFeaturedBlueprint(record.id);
     await owner.deleteBlueprint(record.id);
 
     // Delete from local collection.
@@ -10312,7 +10312,7 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
   constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);
 
-    let ns = ctx.exports.OverseerDurableObject;
+    let ns = env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
 
@@ -10355,7 +10355,7 @@ export class GatekeeperHookLoopback
     implements HookInitiator<RpcTarget> {
   startHook(): Promise<
       {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
-    let ns = this.ctx.exports.OverseerDurableObject;
+    let ns = this.env.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
@@ -10386,7 +10386,7 @@ export class AgentSelfLoopback
   constructor(ctx: ExecutionContext<AgentSelfLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);
 
-    let ns = ctx.exports.OverseerDurableObject;
+    let ns = env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
     let { chatId, initiatorUserId, initiatorModelId } = ctx.props;
@@ -10431,7 +10431,7 @@ export class TransientStubLoopback
   constructor(ctx: ExecutionContext<TransientStubLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);
 
-    let ns = ctx.exports.OverseerDurableObject;
+    let ns = env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
     let target = stub.getTransientStub(
@@ -10465,7 +10465,7 @@ type GadgetTailLoopbackProps = {
 
 export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetTailLoopbackProps> {
   async #deliver(logs: ConsoleLogEvent[]) {
-    let ns = this.ctx.exports.OverseerDurableObject;
+    let ns = this.env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
     await stub.deliverGadgetLogs(this.ctx.props.chatId ?? null, logs);
@@ -10571,7 +10571,7 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
     // TODO: Make traces serializable in workerd.
     event = JSON.parse(JSON.stringify(event));
 
-    let ns = this.ctx.exports.OverseerDurableObject;
+    let ns = this.env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
     await stub.deliverCodeModeTrace(this.ctx.props.executionId, event);
@@ -13041,7 +13041,7 @@ class AgentSpawnerBindingImpl extends RpcTarget implements AgentSpawnerBinding {
   }
 
   #getOverseer() {
-    let ns = this.ctx.exports.OverseerDurableObject;
+    let ns = this.env.OverseerDurableObject;
     let id = ns.idFromString(this.ctx.props.overseerId);
     return ns.get(id);
   }

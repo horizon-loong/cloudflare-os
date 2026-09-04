@@ -25,7 +25,7 @@ export class ExternalMessageGateway extends WorkerEntrypoint<Cloudflare.Env, Ext
     // External gateways decide which Gadget receives a prompt by passing gadgetKey.
     // We prefix that key with the binding-owned source before using it as the DO name,
     // preventing collisions with other gateways and web-created Gadget IDs.
-    let overseer = this.ctx.exports.OverseerDurableObject.getByName(externalKeys.gadget);
+    let overseer = this.env.OverseerDurableObject.getByName(externalKeys.gadget);
 
     return await overseer.receiveExternalMessage({
       callerEmail: input.callerEmail,

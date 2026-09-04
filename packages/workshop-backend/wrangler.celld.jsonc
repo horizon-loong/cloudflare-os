@@ -1,0 +1,67 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "workshop-backend",
+  "main": ".wrangler/validate/src/server.ts",
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": [
+    "allow_irrevocable_stub_storage",
+    "enhanced_error_serialization",
+    "global_fetch_strictly_public",
+    "nodejs_compat"
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "BLUEPRINTS",
+      "preview_id": "gadgets-blueprint-metadata",
+      "id": "gadgets-blueprint-metadata"
+    },
+    {
+      "binding": "AVATARS",
+      "preview_id": "gadgets-avatars",
+      "id": "gadgets-avatars"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLUEPRINT_CONTENT",
+      "bucket_name": "gadgets-blueprint-content"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "UserDurableObject",
+        "class_name": "UserDurableObject"
+      },
+      {
+        "name": "OverseerDurableObject",
+        "class_name": "OverseerDurableObject"
+      },
+      {
+        "name": "AdminSettings",
+        "class_name": "AdminSettings"
+      },
+      {
+        "name": "PendingLogin",
+        "class_name": "PendingLogin"
+      },
+      {
+        "name": "ApiWsDurableObject",
+        "class_name": "ApiWsDurableObject"
+      }
+    ]
+  },
+  "assets": {
+    "directory": "celld-assets",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api",
+      "/api/*"
+    ]
+  },
+  "vars": {
+    "ADMINS": "[\"admin\"]",
+    "PUBLIC_BASE_URL": "http://127.0.0.1:9876"
+  }
+}

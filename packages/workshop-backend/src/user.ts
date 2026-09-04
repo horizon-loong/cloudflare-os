@@ -296,7 +296,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     this.storage = makeUserStorage(ctx.storage);
-    this.adminSettings = this.ctx.exports.AdminSettings;
+    this.adminSettings = this.env.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
   }
@@ -836,7 +836,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let done = examined < OUTPUTS_BACKFILL_PAGE;
 
     let ownerId = this.ctx.id.toString();
-    let overseers = this.ctx.exports.OverseerDurableObject;
+    let overseers = this.env.OverseerDurableObject;
     let results = await Promise.allSettled(targets.map(id =>
         overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
 
@@ -1735,8 +1735,8 @@ export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
   #getUserStub() {
-    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
-    return this.ctx.exports.UserDurableObject.get(userId);
+    let userId = this.env.UserDurableObject.idFromString(this.ctx.props.userId);
+    return this.env.UserDurableObject.get(userId);
   }
 
   async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {

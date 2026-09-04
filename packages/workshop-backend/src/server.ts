@@ -21,7 +21,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { RpcStub as NativeRpcStub, DurableObject } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -80,9 +80,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     super();
 
     this.#userId = userId;
-    this.overseers = this.ctx.exports.OverseerDurableObject;
-    this.adminSettings = this.ctx.exports.AdminSettings;
-    this.users = this.ctx.exports.UserDurableObject;
+    this.overseers = this.env.OverseerDurableObject;
+    this.adminSettings = this.env.AdminSettings;
+    this.users = this.env.UserDurableObject;
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
@@ -640,7 +640,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       private abortSession: (reason: Error) => void,
       private accessPayload?: JWTPayload) {
     super();
-    this.users = this.ctx.exports.UserDurableObject;
+    this.users = this.env.UserDurableObject;
   }
 
   async ping(): Promise<void> {}
@@ -660,8 +660,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
     // invocation. The client never sees its id — we hand back an `attempt` stub instead.
-    const pendingId = this.ctx.exports.PendingLogin.newUniqueId();
-    const pending = this.ctx.exports.PendingLogin.get(pendingId);
+    const pendingId = this.env.PendingLogin.newUniqueId();
+    const pending = this.env.PendingLogin.get(pendingId);
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
     // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
@@ -814,13 +814,17 @@ export default {
     }
 
     if (url.pathname === "/api") {
+      // celld-port: WebSocket upgrades must be served from a Durable Object.
+      if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        return env.ApiWsDurableObject.get(env.ApiWsDurableObject.idFromName("api")).fetch(req);
+      }
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
       // and the DO is idempotent.
       if (!formatBlueprintInstallStarted) {
         formatBlueprintInstallStarted = true;
-        ctx.waitUntil(ctx.exports.AdminSettings.getByName("").ensureFormatBlueprintsInstalled()
+        ctx.waitUntil(env.AdminSettings.getByName("").ensureFormatBlueprintsInstalled()
             .then((complete: boolean) => {
               // A partial install resolves rather than throwing, and nothing else will call the DO
               // from here, so clearing this is the whole retry: one bad archive would otherwise
@@ -871,6 +875,67 @@ export default {
     return new Response("Not Found", {status: 404});
   }
 } satisfies ExportedHandler<Env>;
+
+// ===========================================================================
+// celld-port: WebSocket RPC endpoint inside a Durable Object.
+//
+// celld does not attach a stateless worker's Response.webSocket (the client
+// completes the 101 handshake but no messages are ever delivered), so the /api
+// WebSocket endpoint must run inside a Durable Object using
+// acceptWebSocket() + the webSocketMessage()/webSocketClose() handlers.
+// A duck-typed adapter bridges those handlers to Cap'n Web's WebSocketTransport.
+// ===========================================================================
+
+class CelldWsAdapter {
+  readonly readyState = 1;  // WebSocket.OPEN — skip the CONNECTING send queue
+  private handlers = new Map<string, (ev: any) => void>();
+  constructor(private readonly ws: WebSocket) {}
+  set binaryType(_v: string) {}
+  get binaryType() { return "arraybuffer"; }
+  addEventListener(type: string, handler: (ev: any) => void) { this.handlers.set(type, handler); }
+  removeEventListener(_type: string, _handler: (ev: any) => void) {}
+  send(message: ArrayBuffer | string) { console.error(`[celld-ws] send out: ${typeof message} ${typeof message === "string" ? message.length : message.byteLength}B`); (this.ws as any).send(message); }
+  close(code?: number, reason?: string) { this.ws.close(code, reason); }
+  deliverMessage(data: ArrayBuffer | string) { this.handlers.get("message")?.({ data }); }
+  deliverClose(code: number, reason: string) { this.handlers.get("close")?.({ code, reason }); }
+  deliverError() { this.handlers.get("error")?.({}); }
+}
+
+export class ApiWsDurableObject extends DurableObject {
+  private sessions = new Map<WebSocket, { adapter: CelldWsAdapter; stub: RpcStub<any> }>();
+
+  async fetch(req: Request): Promise<Response> {
+    if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("This endpoint only accepts WebSocket requests.", { status: 400 });
+    }
+    let pair = new WebSocketPair();
+    let server = pair[0];
+    this.ctx.acceptWebSocket(server);
+    let adapter = new CelldWsAdapter(server);
+    let abortSession = (reason: Error) => {
+      logger.warn("aborting api session (DO)", { event: "session.abort", error: reason });
+      adapter.deliverError();
+    };
+    let localMain = new PublicApiImpl(this.ctx as any, this.env, abortSession, undefined);
+    let stub = newWebSocketRpcSession(adapter as any, localMain, {});
+    this.sessions.set(server, { adapter, stub });
+    return new Response(null, { status: 101, webSocket: pair[1] });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
+    console.error(`[celld-ws] msg in: ${typeof message} ${typeof message === "string" ? message.length : message.byteLength}B`);
+    this.sessions.get(ws)?.adapter.deliverMessage(message);
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    this.sessions.get(ws)?.adapter.deliverClose(code, reason);
+    this.sessions.delete(ws);
+  }
+
+  async webSocketError(ws: WebSocket) {
+    this.sessions.get(ws)?.adapter.deliverError();
+  }
+}
 
 // Extend Cap'n Web's RpcSessionOptions with an AbortSignal.
 //

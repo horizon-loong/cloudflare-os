@@ -85,8 +85,8 @@ export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
     implements GatekeeperConnectCallback {
   #pending() {
-    const id = this.ctx.exports.PendingLogin.idFromString(this.ctx.props.pendingId);
-    return this.ctx.exports.PendingLogin.get(id);
+    const id = this.env.PendingLogin.idFromString(this.ctx.props.pendingId);
+    return this.env.PendingLogin.get(id);
   }
 
   async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
@@ -107,8 +107,8 @@ export class LoginConnectCallbackImpl
         await pending.fail("This account has no verified email, so it can't be used to sign in.");
         return;
       }
-      const userStub = this.ctx.exports.UserDurableObject.get(
-          this.ctx.exports.UserDurableObject.idFromName(email));
+      const userStub = this.env.UserDurableObject.get(
+          this.env.UserDurableObject.idFromName(email));
       // Closed signups block first-time account creation here too (not just password signup); an
       // existing user signing in is unaffected.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;

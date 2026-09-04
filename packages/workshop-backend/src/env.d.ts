@@ -86,3 +86,25 @@ declare global {
     }
   }
 }
+
+// celld-port: on celld, Durable Object classes are reached through explicit
+// durable_objects bindings (env.*) instead of workerd's ctx.exports.
+declare global {
+  namespace Cloudflare {
+    interface Env {
+      UserDurableObject: DurableObjectNamespace<import("./user").UserDurableObject>;
+      OverseerDurableObject: DurableObjectNamespace<import("./overseer").OverseerDurableObject>;
+      AdminSettings: DurableObjectNamespace<import("./admin-settings").AdminSettings>;
+      PendingLogin: DurableObjectNamespace<import("./auth/login-flow").PendingLogin>;
+    }
+  }
+}
+
+// celld-port: WS RPC endpoint DO.
+declare global {
+  namespace Cloudflare {
+    interface Env {
+      ApiWsDurableObject: DurableObjectNamespace<import("./server").ApiWsDurableObject>;
+    }
+  }
+}

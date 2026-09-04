@@ -71,7 +71,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
 
     this.storage = makeAdminSettingsStorage(ctx.storage);
-    this.users = this.ctx.exports.UserDurableObject;
+    this.users = this.env.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
