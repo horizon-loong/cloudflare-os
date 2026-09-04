@@ -638,7 +638,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
-      private accessPayload?: JWTPayload) {
+      private accessPayload?: JWTPayload,
+      private inflight?: InFlight) {
     super();
     this.users = this.env.UserDurableObject;
   }
@@ -690,7 +691,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "session_token",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    // celld-port: anchor the authenticated stub to the same in-flight counter as this session,
+    // so every call the client pipelines onto it keeps the WS handler alive on celld.
+    let api = new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return this.inflight ? anchorToHandler(api, this.inflight) : api;
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -715,7 +719,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    let api = new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return this.inflight ? anchorToHandler(api, this.inflight) : api;
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -939,6 +944,7 @@ function anchorToHandler<T extends object>(target: T, inflight: InFlight): T {
 export class ApiWsDurableObject extends DurableObject {
   private sessions = new Map<WebSocket, {
     adapter: CelldWsAdapter; stub: RpcStub<any>; inflight: InFlight;
+    closeWaiters: Array<() => void>;
   }>();
 
   async fetch(req: Request): Promise<Response> {
@@ -955,9 +961,9 @@ export class ApiWsDurableObject extends DurableObject {
     };
     let inflight: InFlight = { n: 0 };
     let localMain = anchorToHandler(
-        new PublicApiImpl(this.ctx as any, this.env, abortSession, undefined), inflight);
+        new PublicApiImpl(this.ctx as any, this.env, abortSession, undefined, inflight), inflight);
     let stub = newWebSocketRpcSession(adapter as any, localMain, {});
-    this.sessions.set(server, { adapter, stub, inflight });
+    this.sessions.set(server, { adapter, stub, inflight, closeWaiters: [] });
     return new Response(null, { status: 101, webSocket: pair[1] });
   }
 
@@ -966,20 +972,38 @@ export class ApiWsDurableObject extends DurableObject {
     let session = this.sessions.get(ws);
     session?.adapter.deliverMessage(message);
     if (!session) return;
-    // celld-port: hold this handler open (with at least one tick so capnweb's
-    // readLoop can start the call) until every call it started has settled.
-    do {
-      await new Promise((r) => setTimeout(r, 10));
-    } while (session.inflight.n > 0);
+    // celld-port: celld stops driving async ops once a WS-message event settles
+    // (keeps_native_ops), which silently kills RPC resolutions that arrive after
+    // the handler returns — including cross-cell stub calls the client pipelines
+    // onto returned objects (the authenticated API, overseer sessions). Register
+    // the official anchor instead: ctx.waitUntil() sets `background`, keeping
+    // this event's drive loop adopting and delivering ops for as long as the
+    // socket is open (bounded to 10 minutes per message so entries can't park
+    // forever). Without waitUntil, fall back to pumping on proxied calls.
+    if (typeof (this.ctx as any).waitUntil === "function") {
+      (this.ctx as any).waitUntil(new Promise<void>((resolve) => {
+        session.closeWaiters.push(resolve);
+        setTimeout(resolve, 600_000);
+      }));
+    } else {
+      do {
+        await new Promise((r) => setTimeout(r, 10));
+      } while (session.inflight.n > 0);
+    }
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
-    this.sessions.get(ws)?.adapter.deliverClose(code, reason);
+    let session = this.sessions.get(ws);
+    session?.adapter.deliverClose(code, reason);
+    for (let wake of session?.closeWaiters.splice(0) ?? []) wake();
     this.sessions.delete(ws);
   }
 
   async webSocketError(ws: WebSocket) {
-    this.sessions.get(ws)?.adapter.deliverError();
+    let session = this.sessions.get(ws);
+    session?.adapter.deliverError();
+    for (let wake of session?.closeWaiters.splice(0) ?? []) wake();
+    this.sessions.delete(ws);
   }
 }
 
