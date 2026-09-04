@@ -901,8 +901,45 @@ class CelldWsAdapter {
   deliverError() { this.handlers.get("error")?.({}); }
 }
 
+// celld-port: celld (0.4.0) only drives async work (KV reads, timers) while the
+// runtime-delivered event handler that spawned it is still pending. Once the
+// handler settles, the drive loop adopts nothing further and ops spawned from
+// detached continuations are silently dropped. capnweb's session invokes RPC
+// methods from exactly such a continuation (its readLoop runs in the microtasks
+// after webSocketMessage returns), so raw `localMain` hangs on any method that
+// touches storage. Anchor it instead: count calls in flight through a proxy and
+// let webSocketMessage hold its handler open until they all settle — celld then
+// keeps pumping for the whole duration of every call.
+type InFlight = { n: number };
+
+function anchorToHandler<T extends object>(target: T, inflight: InFlight): T {
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      let value = Reflect.get(t, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        inflight.n++;
+        let result: unknown;
+        try {
+          result = (value as (...a: unknown[]) => unknown).apply(t, args);
+        } catch (e) {
+          inflight.n--;
+          throw e;
+        }
+        if (result instanceof Promise) {
+          return result.finally(() => { inflight.n--; });
+        }
+        inflight.n--;
+        return result;
+      };
+    },
+  });
+}
+
 export class ApiWsDurableObject extends DurableObject {
-  private sessions = new Map<WebSocket, { adapter: CelldWsAdapter; stub: RpcStub<any> }>();
+  private sessions = new Map<WebSocket, {
+    adapter: CelldWsAdapter; stub: RpcStub<any>; inflight: InFlight;
+  }>();
 
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -916,15 +953,24 @@ export class ApiWsDurableObject extends DurableObject {
       logger.warn("aborting api session (DO)", { event: "session.abort", error: reason });
       adapter.deliverError();
     };
-    let localMain = new PublicApiImpl(this.ctx as any, this.env, abortSession, undefined);
+    let inflight: InFlight = { n: 0 };
+    let localMain = anchorToHandler(
+        new PublicApiImpl(this.ctx as any, this.env, abortSession, undefined), inflight);
     let stub = newWebSocketRpcSession(adapter as any, localMain, {});
-    this.sessions.set(server, { adapter, stub });
+    this.sessions.set(server, { adapter, stub, inflight });
     return new Response(null, { status: 101, webSocket: pair[1] });
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
     console.error(`[celld-ws] msg in: ${typeof message} ${typeof message === "string" ? message.length : message.byteLength}B`);
-    this.sessions.get(ws)?.adapter.deliverMessage(message);
+    let session = this.sessions.get(ws);
+    session?.adapter.deliverMessage(message);
+    if (!session) return;
+    // celld-port: hold this handler open (with at least one tick so capnweb's
+    // readLoop can start the call) until every call it started has settled.
+    do {
+      await new Promise((r) => setTimeout(r, 10));
+    } while (session.inflight.n > 0);
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
