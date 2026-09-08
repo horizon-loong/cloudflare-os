@@ -1890,8 +1890,11 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
-    await this.#runAgentTurn(
-        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
+    // Register the resumed turn as background work (see startAgent): the constructor event this
+    // continuation runs in ends long before the turn does, and a floating turn would be dropped
+    // with it.
+    this.ctx.waitUntil(this.#runAgentTurn(
+        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat));
   }
 
   constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
@@ -5328,7 +5331,7 @@ class OverseerImpl implements AgentHooks {
         let meta = this.storage.chatMeta.get(chatId);
         let liveChat = this.#liveChats.get(chatId);
         if (liveChat?.pendingAgentCallbacks.length && !meta?.activeAgent) {
-          this.#startAgentForCallbacks(meta, liveChat);
+          this.ctx.waitUntil(this.#startAgentForCallbacks(meta, liveChat));
         }
       },
     };
@@ -6999,7 +7002,10 @@ class OverseerImpl implements AgentHooks {
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+             // Historically only keep-alive resumed runs registered their turn with waitUntil;
+             // every turn is background work now (see below), so the flag no longer changes
+             // behavior and is kept for call-site compatibility.
+             _keepAlive: boolean = false): void {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -7013,7 +7019,14 @@ class OverseerImpl implements AgentHooks {
 
     let liveChat = this.#getLiveChat(chatId);
     let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
-    if (keepAlive) this.ctx.waitUntil(turn);
+    // The turn is background work that must outlive the client interaction which happened to
+    // trigger it: a browser tab reloading mid-run, or a gadget's fire-and-forget reportMove
+    // callback, must not take the run down with them. The run already persists an
+    // `activeAgents` resume record and holds the keep-alive alarm — it is designed to be
+    // durable; registering it with waitUntil is what makes that true on runtimes where a
+    // floating promise is dropped the moment its triggering client disconnects.
+    this.ctx.waitUntil(turn);
+    console.error(`[celld-dbg] startAgent: turn registered with waitUntil chat=${chatId}`);
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -7252,8 +7265,14 @@ class OverseerImpl implements AgentHooks {
       liveChat.activeAgentCallbacks.clear();
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
+      console.error(`[celld-dbg] runAgentTurn finally: chat=${chatId} ` +
+        `pendingCallbacks=${liveChat.pendingAgentCallbacks.length}`);
       if (liveChat.pendingAgentCallbacks.length > 0) {
-        this.#startAgentForCallbacks(meta, liveChat);
+        // waitUntil, not fire-and-forget: this turn's promise settles the moment this finally
+        // returns, and on runtimes that tie follow-up work to the registering task, an
+        // unregistered continuation loses its in-flight ops (the restart's very first
+        // getChatContext) and hangs forever. The restart is its own background work.
+        this.ctx.waitUntil(this.#startAgentForCallbacks(meta, liveChat));
       } else {
         this.#deliverWaitingExternalMessageResponse(chatId);
 
@@ -7340,7 +7359,10 @@ class OverseerImpl implements AgentHooks {
     // If the agent is running, we can't just add messages now since it'll confuse the agent, but
     // once the agent finishes it will see the pending callbacks and start another turn.
     if (!meta.activeAgent && !this.isPreparingChatMessage(chatId)) {
-      this.#startAgentForCallbacks(meta, liveChat);
+      // waitUntil: the caller (a gadget's notifyAssistant) typically fire-and-forgets this RPC,
+      // so this event can end before the setup's awaits settle; register the work so its
+      // in-flight ops survive.
+      this.ctx.waitUntil(this.#startAgentForCallbacks(meta, liveChat));
     }
 
     return promise;
@@ -7361,6 +7383,8 @@ class OverseerImpl implements AgentHooks {
       if (!meta) throw new Error("Chat thread was deleted before callback was handled.");
 
       let chatId = meta.id;
+      console.error(`[celld-dbg] startAgentForCallbacks: enter chat=${chatId} ` +
+        `callbacks=${callbacks.length}`);
 
       // Resolve the AI model based on the initiator of the first message. This means this
       // turn gets charged to the first initiator, even if it ends up handling multiple messages.
@@ -7368,21 +7392,29 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromString(callbacks[0].initiatorUserId));
 
       let userMeta = await user.getChatContext(callbacks[0].initiatorModelId);
+      console.error(`[celld-dbg] startAgentForCallbacks: gotChatContext chat=${chatId} ` +
+        `model=${userMeta.aiModel?.profile.id ?? "none"}`);
 
       if (!userMeta.aiModel) {
         throw new Error("No AI model configured for agent callback processing.");
       }
 
+      console.error(`[celld-dbg] startAgentForCallbacks: before prep-wait chat=${chatId}`);
       // getChatContext() waits on the user's Durable Object. A user message may start an agent while
       // that call is pending, so wait for message preparation to finish and then re-read chat state.
       let preparation = this.waitForChatMessagePreparation(chatId);
+      console.error(`[celld-dbg] startAgentForCallbacks: prep=${preparation ? "WAITING" : "none"} chat=${chatId}`);
       while (preparation) {
         await preparation;
         preparation = this.waitForChatMessagePreparation(chatId);
       }
       meta = this.storage.chatMeta.get(chatId);
       if (!meta) throw new Error("Chat thread was deleted before callback was handled.");
-      if (meta.activeAgent) return;
+      if (meta.activeAgent) {
+        console.error(`[celld-dbg] startAgentForCallbacks: activeAgent still set, ` +
+          `chat=${chatId} — deferring`);
+        return;
+      }
 
       let author: AiChatAuthorInfo = {
         type: "gadget",
@@ -7441,10 +7473,13 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
+      console.error(`[celld-dbg] startAgentForCallbacks: calling startAgent chat=${chatId}`);
       this.startAgent(chatId, userMeta.aiModel, author, callbacks[0].initiatorUserId,
                       /* callbackInitiated */ true);
+      console.error(`[celld-dbg] startAgentForCallbacks: startAgent returned chat=${chatId}`);
     } catch (err) {
       // Failure to set up the agent. Make sure to reject all callbacks.
+      console.error(`[celld-dbg] startAgentForCallbacks FAILED: ${err}`);
       liveChat.pendingAgentCallbacks = [];
       for (let cb of callbacks) {
         cb.reject(err);
