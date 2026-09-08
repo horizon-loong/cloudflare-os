@@ -10,6 +10,7 @@ import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/ope
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
+import { DEEPSEEK_MODELS } from "@earendil-works/pi-ai/providers/deepseek.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
@@ -141,14 +142,24 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
 // Token limits for a synthesized model. SUGGESTED_MODELS remains authoritative (compaction
 // budgets in agent-compaction.ts are computed from it and must not change); pi's catalog fills
 // gaps for models we don't list, and unknown models get conservative defaults.
+//
+// Models are keyed by their own provider in pi's catalog. When a gateway surfaces a model
+// under a protocol-mapped provider name (e.g. DeepSeek behind an Anthropic-compatible
+// gateway as provider=anthropic), the provider lookup misses, so we also look the model up
+// in its native provider table. Without this, an uncataloged model falls back to 4096/8192
+// and reasoning turns get truncated mid-tool-call.
 function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined)
     : { contextWindow: number, maxTokens: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
+  const native = catalog ?? DEEPSEEK_MODELS[config.model as keyof typeof DEEPSEEK_MODELS];
   return {
-    contextWindow: suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000,
+    contextWindow: suggested?.contextWindow ?? native?.contextWindow ?? 128_000,
     maxTokens: suggested?.outputLimit ??
         (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
-        catalog?.maxTokens ?? 4096,
+        native?.maxTokens ??
+        // Truly unknown models get a conservative default instead of pi's 4096, which lets
+        // providers like DeepSeek truncate long reasoning turns mid-tool-call.
+        8192,
   };
 }
 

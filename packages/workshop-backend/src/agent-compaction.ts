@@ -27,9 +27,21 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
  */
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
-  let model = SUGGESTED_MODELS[config.provider][config.model];
+  // SUGGESTED_MODELS lists models under the provider that serves them natively. A gateway can
+  // surface a model under a protocol-mapped provider name (e.g. DeepSeek behind an
+  // Anthropic-compatible gateway as provider=anthropic), so fall back to a cross-provider
+  // lookup before the conservative default.
+  let model = SUGGESTED_MODELS[config.provider]?.[config.model] ??
+      Object.values(SUGGESTED_MODELS).map(table => table[config.model]).find(m => m !== undefined);
   let maxOutputTokens = model?.outputLimit ??
-      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined);
+      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
+      // Unlisted models (e.g. third-party gateways surfacing a model under
+      // another provider name) get a conservative default instead of the
+      // provider API's own default: omitting max_tokens lets e.g. DeepSeek's
+      // 4096 default truncate long reasoning turns mid-tool-call.
+      8192;
+  console.error(`[celld-dbg] getModelTokenLimits: provider=${config.provider} ` +
+      `model=${config.model} maxOut=${maxOutputTokens}`);
   return {
     inputBudget: (model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) - (maxOutputTokens ?? 0),
     maxOutputTokens,

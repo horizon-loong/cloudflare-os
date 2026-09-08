@@ -1137,7 +1137,7 @@ export type CloudflareAccountOption = {
 };
 
 /** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "deepseek";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1215,6 +1215,17 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
+  },
+  "deepseek": {
+    // Direct DeepSeek API models. Token limits mirror pi's deepseek catalog
+    // (1M context, 384K output) so compaction budgets and response caps agree
+    // with the model descriptor in ai-models.ts.
+    "deepseek-v4-flash": {
+      name: "DeepSeek V4 Flash", contextWindow: 1000000, outputLimit: 384000,
+    },
+    "deepseek-v4-pro": {
+      name: "DeepSeek V4 Pro", contextWindow: 1000000, outputLimit: 384000,
+    },
   },
   "ollama": {
   },

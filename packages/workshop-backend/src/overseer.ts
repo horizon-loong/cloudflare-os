@@ -80,6 +80,16 @@ export default class extends WorkerEntrypoint {
   verify() {}
   async run(self, callbackResolvers, restoreForger) {
     let env = this.env;
+    // Collect console.log output into the return value. On runtimes that
+    // deliver tails (workerd) the tail loopback still streams the logs live;
+    // the caller only falls back to this return value when the tail never
+    // delivers (celld does not consume Worker Loader tails yet).
+    let capturedLogs = [];
+    let originalLog = console.log.bind(console);
+    console.log = (...args) => {
+      capturedLogs.push(args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" "));
+      originalLog(...args);
+    };
     if (callbackResolvers) {
       for (let [index, {resolve, reject}] of Object.entries(callbackResolvers)) {
         env[index] = {
@@ -108,6 +118,7 @@ export default class extends WorkerEntrypoint {
     }
     let result = await agent(self, env, this.ctx);
     if (result !== undefined) console.log("Return value:", result);
+    return capturedLogs.join("\\n");
   }
 }
 `;
@@ -1844,7 +1855,15 @@ class OverseerImpl implements AgentHooks {
     let aiModel: UserAiModelRecord | undefined;
     try {
       let user = this.users.get(this.users.idFromString(record.initiatorUserId));
-      let userMeta = await user.getChatContext(record.modelId);
+      let userMeta = await Promise.race([
+        user.getChatContext(record.modelId),
+        // celld-port: the cross-cell call can hang after a hard restart; a
+        // hung resume leaves the chat permanently "Waiting for agent…".
+        // Bound it and fall through to the cleanup path instead.
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(
+            "resume: resolving the chat's AI model timed out")), 10000)),
+      ]);
       aiModel = userMeta.aiModel;
     } catch (err) {
       this.logger.error("error resolving model while resuming agent", {
@@ -1939,7 +1958,10 @@ class OverseerImpl implements AgentHooks {
   // any blocked event is delivered) so that if we were called at the start of the alarm handler,
   // it'll recognize that agents are running and wait for them.
   #resumeInterruptedAgents(): void {
-    for (let record of Array.from(this.storage.activeAgents.list())) {
+    const records = Array.from(this.storage.activeAgents.list());
+    console.error(`[celld-dbg] resumeInterruptedAgents: ${records.length} records: ${
+      records.map(r => `#${r.chatId}`).join(",")}`);
+    for (let record of records) {
       // Register the running agent immediately (see above), and create the LiveChatContext
       // synchronously, so that cancellations are immediately respected.
       this.#registerRunningAgent(record.chatId);
@@ -4871,6 +4893,7 @@ class OverseerImpl implements AgentHooks {
   // proposed changes. (The caller is presumed to have verified the chat exists and has proposed
   // changes.)
   loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number): WorkerStub {
+    console.error(`[celld-dbg] loadGadgetWorker gadgetId=${gadgetId} chatId=${chatId} LOADER=${typeof this.env.LOADER}`);
     let codeVersion = `${this.storage.codeVersion.get()}`;
     let sequence: number | undefined;
     // Snapshotted in the same synchronous step as the cache key's sequence: the loader callback
@@ -5014,7 +5037,25 @@ class OverseerImpl implements AgentHooks {
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     let proxy = new Proxy(facet, {
+      // celld-port: runtime receivers check method visibility with `in` before
+      // resolving (Workerd's RpcTarget prototype-method rule). The facet's
+      // methods are dynamic (returned by the get trap below, not on any
+      // prototype), so answer `has` for string method names the way a stub's
+      // wildcard surface does — without this, every gadget RPC ("getState",
+      // "startGame", ...) is rejected with "does not implement the method".
+      // Introspection names stay local so V8/capnweb probes don't become RPCs.
+      has(target, prop) {
+        if (typeof prop === "string" &&
+            prop !== "name" && prop !== "constructor" && prop !== "then" &&
+            prop !== "toString" && prop !== "valueOf" && prop !== "length" &&
+            prop !== "inspect") {
+          return true;
+        }
+        return Reflect.has(target, prop);
+      },
       get(target, prop, receiver) {
+        // celld-port: answer common introspection probes locally.
+        if (prop === "name") return undefined;
         // The lease ends when the client disposes the stub. (The DO reset that severs sessions
         // releases it implicitly, by discarding this object -- and joinSession's leave is
         // idempotent, so a double dispose is harmless.)
@@ -5045,6 +5086,7 @@ class OverseerImpl implements AgentHooks {
         return (...args: any[]) => {
           let result: Promise<any> = Reflect.apply(method, target, args);
           return result.catch((err: any) => {
+            console.error(`[celld-dbg] gadget facet RPC ${String(prop)} failed:`, err, err?.stack ?? '');
             let msg = err;
             if (err instanceof Error) {
               // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
@@ -7505,6 +7547,8 @@ class OverseerImpl implements AgentHooks {
     // Worktrees never seed chats: they are chat-private and carry no bindingName at all.
     let gadgets = [...this.storage.gadgets.list()]
         .filter((gadget): gadget is GadgetRecord => gadget.type === "gadget" && !gadget.pending);
+    console.error(`[celld-dbg] defaultBindingList gadgets: ${
+      gadgets.map(g => `#${g.id} name=${g.bindingName} keys=${Object.keys(g).join("|")}`).join(", ")}`);
     for (let gadget of gadgets) {
       if (!(gadget.bindingName in result)) result[gadget.bindingName] = gadget.id;
     }
@@ -8604,7 +8648,9 @@ class OverseerImpl implements AgentHooks {
       let entrypoint = this.env.LOADER.load(workerDef).getEntrypoint<CodeModeEntrypoint>();
 
       // First check the code actually starts up. Treat startup errors as total failures.
+      console.error(`[celld-dbg] executeCodeMode before verify`);
       await entrypoint.verify();
+      console.error(`[celld-dbg] executeCodeMode after verify`);
 
       // Create the `self` magic object that allows executed code to call back into this
       // chat thread. Uses the initiator's user ID for model resolution on callbacks.
@@ -8636,11 +8682,14 @@ class OverseerImpl implements AgentHooks {
       }
 
       let error: string | undefined;
+      let capturedLog = "";
       try {
         // The forger is a transient stub argument, so the capability to forge persistent
         // gadget-restore stubs lives exactly as long as this run() call.
-        await entrypoint.run(selfStub, callbackResolvers,
-            new RestoreForgerImpl(this, chatId, bindings));
+        console.error(`[celld-dbg] executeCodeMode before run`);
+        capturedLog = (await entrypoint.run(selfStub, callbackResolvers,
+            new RestoreForgerImpl(this, chatId, bindings))) ?? "";
+        console.error(`[celld-dbg] executeCodeMode after run`);
       } catch (err) {
         if (err instanceof Error && err.stack) {
           error = err.stack;
@@ -8654,8 +8703,15 @@ class OverseerImpl implements AgentHooks {
       let trace = await Promise.race([tracePromise, timeout])
 
       if (!trace) {
-        // Trace must have been lost... give up waiting.
-        throw new Error("Timed out waiting for logs from code execution.");
+        // celld does not deliver Worker Loader tails; the harness captured the
+        // console output into run()'s return value as a fallback.
+        let log = capturedLog || "";
+        if (error !== undefined) {
+          log += `\n\nUncaught exception: ${error}`;
+        } else if (log === "") {
+          log = "(function succeeded with no output)";
+        }
+        return log;
       }
 
       let log = trace.logs.map(log => {
@@ -10607,15 +10663,21 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
 
-    // @ts-ignore: LSP-only RPC types bug, "type instantiation is excessively deep"
-    let session = stub.startGatekeeperSession(
+    // Resolve the session up front so the proxy wraps the concrete session
+    // stub, not the RPC promise. Workerd's RpcPromise supports property
+    // pipelining (so the eager form works there), but celld does not; the
+    // eager promise proxy resolves nothing and every call fails with
+    // "does not implement the method". The resolved form is equivalent on
+    // both runtimes.
+    let sessionP: Promise<any> = stub.startGatekeeperSession(
         this.ctx.props.target, this.ctx.props.caller);
 
-    return new Proxy(session, {
+    return new Proxy({}, {
       get(target, prop, receiver) {
-        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
-        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
-        return Reflect.get(target, prop, target);
+        if (prop === "then") return undefined;
+        if (typeof prop !== "string") return undefined;
+        return (...args: any[]) => sessionP.then(
+            (session) => Reflect.get(session, prop, session)(...args));
       },
       getPrototypeOf(target) {
         return WorkerEntrypoint.prototype;
@@ -10685,6 +10747,16 @@ export class AgentSelfLoopback
     return new Proxy<AgentSelfLoopback>(<any>this, {
       get(target, prop, receiver) {
         if (typeof prop === 'symbol') return Reflect.get(target, prop, target);
+        // celld-port: `dup` is stub protocol, not an agent callback. Forwarding
+        // it to deliverAgentCallback made the agent answer an arbitrary value
+        // which the gadget then stored as its "opponent" — a dead reference
+        // after the facet restarted, so every later reportMove rejected
+        // immediately. Mint a fresh loopback instead: it is svc-shaped, so it
+        // survives storage round-trips (revived by name + props) on celld and
+        // is a normal native stub dup on workerd.
+        if (prop === 'dup') {
+          return () => env.exports.AgentSelfLoopback({props: ctx.props});
+        }
         return (...args: unknown[]) => {
           return stub.deliverAgentCallback(
               chatId, String(prop), args, initiatorUserId, initiatorModelId);
@@ -11782,8 +11854,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listChats(): Promise<AiChatMetadata[]> {
-    return [...this.impl.storage.chatMeta.list({reverse: true})]
-        .map(meta => this.impl.chatMetaForClient(meta));
+    const chats = [...this.impl.storage.chatMeta.list({reverse: true})];
+    console.error(`[celld-dbg] listChats: ${
+      chats.map(c => `#${c.id} active=${!!c.activeAgent}`).join(", ")}`);
+    return chats.map(meta => this.impl.chatMetaForClient(meta));
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
