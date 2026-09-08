@@ -6834,12 +6834,35 @@ class OverseerImpl implements AgentHooks {
           `\`\`\`\n`;
     }
     if (gadget) {
+      // celld-port: surface the gadget's method list directly. Workerd has no
+      // runtime method discovery on RPC stubs (probing lies — every property
+      // reads as a function), so the agent otherwise has to read server.js on
+      // disk for every gadget. Extract the exported class's method names from
+      // the committed source; read the file for full signatures when needed.
+      let methods: string[] | undefined;
+      try {
+        let head = this.getGadgetHead(id);
+        if (head !== undefined) {
+          let files = await this.gitStore.readCommitFiles(head);
+          let server = files.get("server.js") ?? [...files.values()].find(f => /class\s+Gadget\b/.test(f ?? ""));
+          if (server) {
+            let cls = server.match(/export\s+class\s+Gadget[\s\S]*\n\}/)?.[0] ?? server;
+            methods = [...cls.matchAll(/(?:^|\n)\s{2}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/g)]
+                .map(m => m[1])
+                .filter(n => n !== "constructor" && n !== "if" && n !== "for" && n !== "while" && n !== "switch" && n !== "catch");
+          }
+        }
+      } catch {
+        // Description is best-effort; the static text below is always correct.
+      }
       return `Binding: ${envName}\n` +
           `\n` +
           `This binding is an RPC stub that points at the main Durable Object instance of the ` +
           `Gadget ${JSON.stringify(gadget.title)}. Calling a method on the stub invokes the ` +
-          `same-named method on the class exported by the Gadget's server.js (read that file to ` +
-          `learn the API it offers).`;
+          `same-named method on the class exported by the Gadget's server.js.` +
+          (methods?.length
+              ? ` The class currently implements: ${methods.join(", ")}. (Read server.js for full signatures.)`
+              : ` (Read that file to learn the API it offers.)`);
     }
     let gatekeeper = this.storage.gatekeepers.get(id);
     if (!gatekeeper) {
