@@ -9688,6 +9688,11 @@ type OverseerRestoreParams = {
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   private impl: OverseerImpl;
+  // celld-port: the owner's workspace client surface, created by open().
+  // celld's cross-cell RPC resolves methods on the receiving cell's DO class
+  // instance only, so the workspace page's chat RPCs need DO-level
+  // pass-throughs (see the proxy in the constructor).
+  #ownerClient: OverseerClientInterface | undefined;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -9710,6 +9715,84 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     await this.impl.deliverReadyExternalMessageResponses();
   }
 
+  // celld-port: DO-level pass-throughs for the workspace chat surface. celld's
+  // cross-cell dispatch resolves methods on this DO class only, so the
+  // workspace page's RPCs (which capnweb addresses to the returned
+  // OverseerClientInterface) must resolve here. Each delegates to the owner
+  // client surface created by open().
+  #ownerCall(method: string, ...args: unknown[]): unknown {
+    const fn = (this.#ownerClient as unknown as Record<string, (...a: unknown[]) => unknown>)[method];
+    if (typeof fn !== "function") throw new Error(`no such method on workspace client: ${method}`);
+    return fn.apply(this.#ownerClient, args);
+  }
+  listChats(...args: Parameters<Overseer["listChats"]>): ReturnType<Overseer["listChats"]> { return this.#ownerCall("listChats", ...args); }
+  listModels(...args: Parameters<Overseer["listModels"]>): ReturnType<Overseer["listModels"]> { return this.#ownerCall("listModels", ...args); }
+  getChatHistory(...args: Parameters<Overseer["getChatHistory"]>): ReturnType<Overseer["getChatHistory"]> { return this.#ownerCall("getChatHistory", ...args); }
+  getChatMessage(...args: Parameters<Overseer["getChatMessage"]>): ReturnType<Overseer["getChatMessage"]> { return this.#ownerCall("getChatMessage", ...args); }
+  subscribeToChat(...args: Parameters<Overseer["subscribeToChat"]>): ReturnType<Overseer["subscribeToChat"]> { return this.#ownerCall("subscribeToChat", ...args); }
+  listSlashCommands(...args: Parameters<Overseer["listSlashCommands"]>): ReturnType<Overseer["listSlashCommands"]> { return this.#ownerCall("listSlashCommands", ...args); }
+  newChat(...args: Parameters<Overseer["newChat"]>): ReturnType<Overseer["newChat"]> { return this.#ownerCall("newChat", ...args); }
+  sendChatMessage(...args: Parameters<Overseer["sendChatMessage"]>): ReturnType<Overseer["sendChatMessage"]> { return this.#ownerCall("sendChatMessage", ...args); }
+  uploadChatAttachment(...args: Parameters<Overseer["uploadChatAttachment"]>): ReturnType<Overseer["uploadChatAttachment"]> { return this.#ownerCall("uploadChatAttachment", ...args); }
+  getChatAttachmentContent(...args: Parameters<Overseer["getChatAttachmentContent"]>): ReturnType<Overseer["getChatAttachmentContent"]> { return this.#ownerCall("getChatAttachmentContent", ...args); }
+  deleteChatAttachment(...args: Parameters<Overseer["deleteChatAttachment"]>): ReturnType<Overseer["deleteChatAttachment"]> { return this.#ownerCall("deleteChatAttachment", ...args); }
+  setChatTitle(...args: Parameters<Overseer["setChatTitle"]>): ReturnType<Overseer["setChatTitle"]> { return this.#ownerCall("setChatTitle", ...args); }
+  mergeChanges(...args: Parameters<Overseer["mergeChanges"]>): ReturnType<Overseer["mergeChanges"]> { return this.#ownerCall("mergeChanges", ...args); }
+  updateChatFromMainline(...args: Parameters<Overseer["updateChatFromMainline"]>): ReturnType<Overseer["updateChatFromMainline"]> { return this.#ownerCall("updateChatFromMainline", ...args); }
+  revertChanges(...args: Parameters<Overseer["revertChanges"]>): ReturnType<Overseer["revertChanges"]> { return this.#ownerCall("revertChanges", ...args); }
+  finalizeChatDraft(...args: Parameters<Overseer["finalizeChatDraft"]>): ReturnType<Overseer["finalizeChatDraft"]> { return this.#ownerCall("finalizeChatDraft", ...args); }
+  discardChatDraftChanges(...args: Parameters<Overseer["discardChatDraftChanges"]>): ReturnType<Overseer["discardChatDraftChanges"]> { return this.#ownerCall("discardChatDraftChanges", ...args); }
+  deleteChat(...args: Parameters<Overseer["deleteChat"]>): ReturnType<Overseer["deleteChat"]> { return this.#ownerCall("deleteChat", ...args); }
+  stopAgent(...args: Parameters<Overseer["stopAgent"]>): ReturnType<Overseer["stopAgent"]> { return this.#ownerCall("stopAgent", ...args); }
+  retryAgent(...args: Parameters<Overseer["retryAgent"]>): ReturnType<Overseer["retryAgent"]> { return this.#ownerCall("retryAgent", ...args); }
+  getMetadata(...args: Parameters<Overseer["getMetadata"]>): ReturnType<Overseer["getMetadata"]> { return this.#ownerCall("getMetadata", ...args); }
+  subscribeToMetadata(...args: Parameters<Overseer["subscribeToMetadata"]>): ReturnType<Overseer["subscribeToMetadata"]> { return this.#ownerCall("subscribeToMetadata", ...args); }
+  subscribeToPresence(...args: Parameters<Overseer["subscribeToPresence"]>): ReturnType<Overseer["subscribeToPresence"]> { return this.#ownerCall("subscribeToPresence", ...args); }
+  setTitle(...args: Parameters<Overseer["setTitle"]>): ReturnType<Overseer["setTitle"]> { return this.#ownerCall("setTitle", ...args); }
+  setPinned(...args: Parameters<Overseer["setPinned"]>): ReturnType<Overseer["setPinned"]> { return this.#ownerCall("setPinned", ...args); }
+  deleteSelf(...args: Parameters<Overseer["deleteSelf"]>): ReturnType<Overseer["deleteSelf"]> { return this.#ownerCall("deleteSelf", ...args); }
+  subscribeToWorkpieces(...args: Parameters<Overseer["subscribeToWorkpieces"]>): ReturnType<Overseer["subscribeToWorkpieces"]> { return this.#ownerCall("subscribeToWorkpieces", ...args); }
+  createGadget(...args: Parameters<Overseer["createGadget"]>): ReturnType<Overseer["createGadget"]> { return this.#ownerCall("createGadget", ...args); }
+  getGadget(...args: Parameters<Overseer["getGadget"]>): ReturnType<Overseer["getGadget"]> { return this.#ownerCall("getGadget", ...args); }
+  getCodeAtCommit(...args: Parameters<Overseer["getCodeAtCommit"]>): ReturnType<Overseer["getCodeAtCommit"]> { return this.#ownerCall("getCodeAtCommit", ...args); }
+  getCommitLog(...args: Parameters<Overseer["getCommitLog"]>): ReturnType<Overseer["getCommitLog"]> { return this.#ownerCall("getCommitLog", ...args); }
+  submitCodeChange(...args: Parameters<Overseer["submitCodeChange"]>): ReturnType<Overseer["submitCodeChange"]> { return this.#ownerCall("submitCodeChange", ...args); }
+  getGatekeeperById(...args: Parameters<Overseer["getGatekeeperById"]>): ReturnType<Overseer["getGatekeeperById"]> { return this.#ownerCall("getGatekeeperById", ...args); }
+  newGatekeeper(...args: Parameters<Overseer["newGatekeeper"]>): ReturnType<Overseer["newGatekeeper"]> { return this.#ownerCall("newGatekeeper", ...args); }
+  newAiModelGatekeeper(...args: Parameters<Overseer["newAiModelGatekeeper"]>): ReturnType<Overseer["newAiModelGatekeeper"]> { return this.#ownerCall("newAiModelGatekeeper", ...args); }
+  newAgentSpawnerGatekeeper(...args: Parameters<Overseer["newAgentSpawnerGatekeeper"]>): ReturnType<Overseer["newAgentSpawnerGatekeeper"]> { return this.#ownerCall("newAgentSpawnerGatekeeper", ...args); }
+  listActions(...args: Parameters<Overseer["listActions"]>): ReturnType<Overseer["listActions"]> { return this.#ownerCall("listActions", ...args); }
+  approveAction(...args: Parameters<Overseer["approveAction"]>): ReturnType<Overseer["approveAction"]> { return this.#ownerCall("approveAction", ...args); }
+  rejectAction(...args: Parameters<Overseer["rejectAction"]>): ReturnType<Overseer["rejectAction"]> { return this.#ownerCall("rejectAction", ...args); }
+  listHooks(...args: Parameters<Overseer["listHooks"]>): ReturnType<Overseer["listHooks"]> { return this.#ownerCall("listHooks", ...args); }
+  enableHook(...args: Parameters<Overseer["enableHook"]>): ReturnType<Overseer["enableHook"]> { return this.#ownerCall("enableHook", ...args); }
+  disableHook(...args: Parameters<Overseer["disableHook"]>): ReturnType<Overseer["disableHook"]> { return this.#ownerCall("disableHook", ...args); }
+  deleteHook(...args: Parameters<Overseer["deleteHook"]>): ReturnType<Overseer["deleteHook"]> { return this.#ownerCall("deleteHook", ...args); }
+  setAutoApprovedActionKind(...args: Parameters<Overseer["setAutoApprovedActionKind"]>): ReturnType<Overseer["setAutoApprovedActionKind"]> { return this.#ownerCall("setAutoApprovedActionKind", ...args); }
+  removeAutoApprovedActionKind(...args: Parameters<Overseer["removeAutoApprovedActionKind"]>): ReturnType<Overseer["removeAutoApprovedActionKind"]> { return this.#ownerCall("removeAutoApprovedActionKind", ...args); }
+  listAutoApprovedActionKinds(...args: Parameters<Overseer["listAutoApprovedActionKinds"]>): ReturnType<Overseer["listAutoApprovedActionKinds"]> { return this.#ownerCall("listAutoApprovedActionKinds", ...args); }
+  listPreApprovableActions(...args: Parameters<Overseer["listPreApprovableActions"]>): ReturnType<Overseer["listPreApprovableActions"]> { return this.#ownerCall("listPreApprovableActions", ...args); }
+  acceptConnectionRequest(...args: Parameters<Overseer["acceptConnectionRequest"]>): ReturnType<Overseer["acceptConnectionRequest"]> { return this.#ownerCall("acceptConnectionRequest", ...args); }
+  denyConnectionRequest(...args: Parameters<Overseer["denyConnectionRequest"]>): ReturnType<Overseer["denyConnectionRequest"]> { return this.#ownerCall("denyConnectionRequest", ...args); }
+  subscribeToActions(...args: Parameters<Overseer["subscribeToActions"]>): ReturnType<Overseer["subscribeToActions"]> { return this.#ownerCall("subscribeToActions", ...args); }
+  subscribeToConsoleLogs(...args: Parameters<Overseer["subscribeToConsoleLogs"]>): ReturnType<Overseer["subscribeToConsoleLogs"]> { return this.#ownerCall("subscribeToConsoleLogs", ...args); }
+  listBlueprints(...args: Parameters<Overseer["listBlueprints"]>): ReturnType<Overseer["listBlueprints"]> { return this.#ownerCall("listBlueprints", ...args); }
+  updateBlueprint(...args: Parameters<Overseer["updateBlueprint"]>): ReturnType<Overseer["updateBlueprint"]> { return this.#ownerCall("updateBlueprint", ...args); }
+  deleteBlueprint(...args: Parameters<Overseer["deleteBlueprint"]>): ReturnType<Overseer["deleteBlueprint"]> { return this.#ownerCall("deleteBlueprint", ...args); }
+  retryBlueprintPublish(...args: Parameters<Overseer["retryBlueprintPublish"]>): ReturnType<Overseer["retryBlueprintPublish"]> { return this.#ownerCall("retryBlueprintPublish", ...args); }
+  listObserverRequirements(...args: Parameters<Overseer["listObserverRequirements"]>): ReturnType<Overseer["listObserverRequirements"]> { return this.#ownerCall("listObserverRequirements", ...args); }
+  listCollaborators(...args: Parameters<Overseer["listCollaborators"]>): ReturnType<Overseer["listCollaborators"]> { return this.#ownerCall("listCollaborators", ...args); }
+  addCollaborator(...args: Parameters<Overseer["addCollaborator"]>): ReturnType<Overseer["addCollaborator"]> { return this.#ownerCall("addCollaborator", ...args); }
+  removeCollaborator(...args: Parameters<Overseer["removeCollaborator"]>): ReturnType<Overseer["removeCollaborator"]> { return this.#ownerCall("removeCollaborator", ...args); }
+  previewRemoveCollaborator(...args: Parameters<Overseer["previewRemoveCollaborator"]>): ReturnType<Overseer["previewRemoveCollaborator"]> { return this.#ownerCall("previewRemoveCollaborator", ...args); }
+  createShareLink(...args: Parameters<Overseer["createShareLink"]>): ReturnType<Overseer["createShareLink"]> { return this.#ownerCall("createShareLink", ...args); }
+  newShareLinkKey(...args: Parameters<Overseer["newShareLinkKey"]>): ReturnType<Overseer["newShareLinkKey"]> { return this.#ownerCall("newShareLinkKey", ...args); }
+  listShareLinks(...args: Parameters<Overseer["listShareLinks"]>): ReturnType<Overseer["listShareLinks"]> { return this.#ownerCall("listShareLinks", ...args); }
+  updateShareLink(...args: Parameters<Overseer["updateShareLink"]>): ReturnType<Overseer["updateShareLink"]> { return this.#ownerCall("updateShareLink", ...args); }
+  revokeShareLink(...args: Parameters<Overseer["revokeShareLink"]>): ReturnType<Overseer["revokeShareLink"]> { return this.#ownerCall("revokeShareLink", ...args); }
+  previewRevokeShareLink(...args: Parameters<Overseer["previewRevokeShareLink"]>): ReturnType<Overseer["previewRevokeShareLink"]> { return this.#ownerCall("previewRevokeShareLink", ...args); }
+
+  // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
   // an empty Yjs snapshot as legacy code version 1; workspaces born since have no legacy code
   // log at all -- committed code exists only once a first commit lands in the git store.)
@@ -9868,11 +9951,219 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           this.impl, profileId, userId, notifyClosed.dup());
     }
 
-    return new OverseerClientInterface(
+    const client = new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
         ensureCapsules);
+    // celld-port: the DO-level pass-throughs resolve against this surface.
+    this.#ownerClient = client;
+    return client;
   }
 
+
+  // ======================================================================================
+  // celld-port: the workspace chat/gadget surface, exposed as DO-level methods. celld's
+  // cross-cell dispatch resolves methods on this DO class only, so every RPC the
+  // workspace page makes must resolve here and delegate to the owner's client surface
+  // created by open().
+  // ======================================================================================
+  async acceptConnectionRequest(...args: Parameters<Overseer["acceptConnectionRequest"]>): ReturnType<Overseer["acceptConnectionRequest"]> {
+    return this.#ownerClient.acceptConnectionRequest(...(args as Parameters<Overseer["acceptConnectionRequest"]>));
+  }
+  async addCollaborator(...args: Parameters<Overseer["addCollaborator"]>): ReturnType<Overseer["addCollaborator"]> {
+    return this.#ownerClient.addCollaborator(...(args as Parameters<Overseer["addCollaborator"]>));
+  }
+  async approveAction(...args: Parameters<Overseer["approveAction"]>): ReturnType<Overseer["approveAction"]> {
+    return this.#ownerClient.approveAction(...(args as Parameters<Overseer["approveAction"]>));
+  }
+  async createGadget(...args: Parameters<Overseer["createGadget"]>): ReturnType<Overseer["createGadget"]> {
+    return this.#ownerClient.createGadget(...(args as Parameters<Overseer["createGadget"]>));
+  }
+  async createShareLink(...args: Parameters<Overseer["createShareLink"]>): ReturnType<Overseer["createShareLink"]> {
+    return this.#ownerClient.createShareLink(...(args as Parameters<Overseer["createShareLink"]>));
+  }
+  async deleteBlueprint(...args: Parameters<Overseer["deleteBlueprint"]>): ReturnType<Overseer["deleteBlueprint"]> {
+    return this.#ownerClient.deleteBlueprint(...(args as Parameters<Overseer["deleteBlueprint"]>));
+  }
+  async deleteChat(...args: Parameters<Overseer["deleteChat"]>): ReturnType<Overseer["deleteChat"]> {
+    return this.#ownerClient.deleteChat(...(args as Parameters<Overseer["deleteChat"]>));
+  }
+  async deleteChatAttachment(...args: Parameters<Overseer["deleteChatAttachment"]>): ReturnType<Overseer["deleteChatAttachment"]> {
+    return this.#ownerClient.deleteChatAttachment(...(args as Parameters<Overseer["deleteChatAttachment"]>));
+  }
+  async deleteHook(...args: Parameters<Overseer["deleteHook"]>): ReturnType<Overseer["deleteHook"]> {
+    return this.#ownerClient.deleteHook(...(args as Parameters<Overseer["deleteHook"]>));
+  }
+  async deleteSelf(...args: Parameters<Overseer["deleteSelf"]>): ReturnType<Overseer["deleteSelf"]> {
+    return this.#ownerClient.deleteSelf(...(args as Parameters<Overseer["deleteSelf"]>));
+  }
+  async denyConnectionRequest(...args: Parameters<Overseer["denyConnectionRequest"]>): ReturnType<Overseer["denyConnectionRequest"]> {
+    return this.#ownerClient.denyConnectionRequest(...(args as Parameters<Overseer["denyConnectionRequest"]>));
+  }
+  async disableHook(...args: Parameters<Overseer["disableHook"]>): ReturnType<Overseer["disableHook"]> {
+    return this.#ownerClient.disableHook(...(args as Parameters<Overseer["disableHook"]>));
+  }
+  async discardChatDraftChanges(...args: Parameters<Overseer["discardChatDraftChanges"]>): ReturnType<Overseer["discardChatDraftChanges"]> {
+    return this.#ownerClient.discardChatDraftChanges(...(args as Parameters<Overseer["discardChatDraftChanges"]>));
+  }
+  async enableHook(...args: Parameters<Overseer["enableHook"]>): ReturnType<Overseer["enableHook"]> {
+    return this.#ownerClient.enableHook(...(args as Parameters<Overseer["enableHook"]>));
+  }
+  async finalizeChatDraft(...args: Parameters<Overseer["finalizeChatDraft"]>): ReturnType<Overseer["finalizeChatDraft"]> {
+    return this.#ownerClient.finalizeChatDraft(...(args as Parameters<Overseer["finalizeChatDraft"]>));
+  }
+  async getChatAttachmentContent(...args: Parameters<Overseer["getChatAttachmentContent"]>): ReturnType<Overseer["getChatAttachmentContent"]> {
+    return this.#ownerClient.getChatAttachmentContent(...(args as Parameters<Overseer["getChatAttachmentContent"]>));
+  }
+  async getChatHistory(...args: Parameters<Overseer["getChatHistory"]>): ReturnType<Overseer["getChatHistory"]> {
+    return this.#ownerClient.getChatHistory(...(args as Parameters<Overseer["getChatHistory"]>));
+  }
+  async getChatMessage(...args: Parameters<Overseer["getChatMessage"]>): ReturnType<Overseer["getChatMessage"]> {
+    return this.#ownerClient.getChatMessage(...(args as Parameters<Overseer["getChatMessage"]>));
+  }
+  async getCodeAtCommit(...args: Parameters<Overseer["getCodeAtCommit"]>): ReturnType<Overseer["getCodeAtCommit"]> {
+    return this.#ownerClient.getCodeAtCommit(...(args as Parameters<Overseer["getCodeAtCommit"]>));
+  }
+  async getCommitLog(...args: Parameters<Overseer["getCommitLog"]>): ReturnType<Overseer["getCommitLog"]> {
+    return this.#ownerClient.getCommitLog(...(args as Parameters<Overseer["getCommitLog"]>));
+  }
+  async getGadget(...args: Parameters<Overseer["getGadget"]>): ReturnType<Overseer["getGadget"]> {
+    return this.#ownerClient.getGadget(...(args as Parameters<Overseer["getGadget"]>));
+  }
+  async getGatekeeperById(...args: Parameters<Overseer["getGatekeeperById"]>): ReturnType<Overseer["getGatekeeperById"]> {
+    return this.#ownerClient.getGatekeeperById(...(args as Parameters<Overseer["getGatekeeperById"]>));
+  }
+  async getMetadata(...args: Parameters<Overseer["getMetadata"]>): ReturnType<Overseer["getMetadata"]> {
+    return this.#ownerClient.getMetadata(...(args as Parameters<Overseer["getMetadata"]>));
+  }
+  async listActions(...args: Parameters<Overseer["listActions"]>): ReturnType<Overseer["listActions"]> {
+    return this.#ownerClient.listActions(...(args as Parameters<Overseer["listActions"]>));
+  }
+  async listAutoApprovedActionKinds(...args: Parameters<Overseer["listAutoApprovedActionKinds"]>): ReturnType<Overseer["listAutoApprovedActionKinds"]> {
+    return this.#ownerClient.listAutoApprovedActionKinds(...(args as Parameters<Overseer["listAutoApprovedActionKinds"]>));
+  }
+  async listBlueprints(...args: Parameters<Overseer["listBlueprints"]>): ReturnType<Overseer["listBlueprints"]> {
+    return this.#ownerClient.listBlueprints(...(args as Parameters<Overseer["listBlueprints"]>));
+  }
+  async listChats(...args: Parameters<Overseer["listChats"]>): ReturnType<Overseer["listChats"]> {
+    return this.#ownerClient.listChats(...(args as Parameters<Overseer["listChats"]>));
+  }
+  async listCollaborators(...args: Parameters<Overseer["listCollaborators"]>): ReturnType<Overseer["listCollaborators"]> {
+    return this.#ownerClient.listCollaborators(...(args as Parameters<Overseer["listCollaborators"]>));
+  }
+  async listHooks(...args: Parameters<Overseer["listHooks"]>): ReturnType<Overseer["listHooks"]> {
+    return this.#ownerClient.listHooks(...(args as Parameters<Overseer["listHooks"]>));
+  }
+  async listModels(...args: Parameters<Overseer["listModels"]>): ReturnType<Overseer["listModels"]> {
+    return this.#ownerClient.listModels(...(args as Parameters<Overseer["listModels"]>));
+  }
+  async listObserverRequirements(...args: Parameters<Overseer["listObserverRequirements"]>): ReturnType<Overseer["listObserverRequirements"]> {
+    return this.#ownerClient.listObserverRequirements(...(args as Parameters<Overseer["listObserverRequirements"]>));
+  }
+  async listPreApprovableActions(...args: Parameters<Overseer["listPreApprovableActions"]>): ReturnType<Overseer["listPreApprovableActions"]> {
+    return this.#ownerClient.listPreApprovableActions(...(args as Parameters<Overseer["listPreApprovableActions"]>));
+  }
+  async listShareLinks(...args: Parameters<Overseer["listShareLinks"]>): ReturnType<Overseer["listShareLinks"]> {
+    return this.#ownerClient.listShareLinks(...(args as Parameters<Overseer["listShareLinks"]>));
+  }
+  async listSlashCommands(...args: Parameters<Overseer["listSlashCommands"]>): ReturnType<Overseer["listSlashCommands"]> {
+    return this.#ownerClient.listSlashCommands(...(args as Parameters<Overseer["listSlashCommands"]>));
+  }
+  async mergeChanges(...args: Parameters<Overseer["mergeChanges"]>): ReturnType<Overseer["mergeChanges"]> {
+    return this.#ownerClient.mergeChanges(...(args as Parameters<Overseer["mergeChanges"]>));
+  }
+  async newAgentSpawnerGatekeeper(...args: Parameters<Overseer["newAgentSpawnerGatekeeper"]>): ReturnType<Overseer["newAgentSpawnerGatekeeper"]> {
+    return this.#ownerClient.newAgentSpawnerGatekeeper(...(args as Parameters<Overseer["newAgentSpawnerGatekeeper"]>));
+  }
+  async newAiModelGatekeeper(...args: Parameters<Overseer["newAiModelGatekeeper"]>): ReturnType<Overseer["newAiModelGatekeeper"]> {
+    return this.#ownerClient.newAiModelGatekeeper(...(args as Parameters<Overseer["newAiModelGatekeeper"]>));
+  }
+  async newChat(...args: Parameters<Overseer["newChat"]>): ReturnType<Overseer["newChat"]> {
+    return this.#ownerClient.newChat(...(args as Parameters<Overseer["newChat"]>));
+  }
+  async newGatekeeper(...args: Parameters<Overseer["newGatekeeper"]>): ReturnType<Overseer["newGatekeeper"]> {
+    return this.#ownerClient.newGatekeeper(...(args as Parameters<Overseer["newGatekeeper"]>));
+  }
+  async newShareLinkKey(...args: Parameters<Overseer["newShareLinkKey"]>): ReturnType<Overseer["newShareLinkKey"]> {
+    return this.#ownerClient.newShareLinkKey(...(args as Parameters<Overseer["newShareLinkKey"]>));
+  }
+  async previewRemoveCollaborator(...args: Parameters<Overseer["previewRemoveCollaborator"]>): ReturnType<Overseer["previewRemoveCollaborator"]> {
+    return this.#ownerClient.previewRemoveCollaborator(...(args as Parameters<Overseer["previewRemoveCollaborator"]>));
+  }
+  async previewRevokeShareLink(...args: Parameters<Overseer["previewRevokeShareLink"]>): ReturnType<Overseer["previewRevokeShareLink"]> {
+    return this.#ownerClient.previewRevokeShareLink(...(args as Parameters<Overseer["previewRevokeShareLink"]>));
+  }
+  async rejectAction(...args: Parameters<Overseer["rejectAction"]>): ReturnType<Overseer["rejectAction"]> {
+    return this.#ownerClient.rejectAction(...(args as Parameters<Overseer["rejectAction"]>));
+  }
+  async removeAutoApprovedActionKind(...args: Parameters<Overseer["removeAutoApprovedActionKind"]>): ReturnType<Overseer["removeAutoApprovedActionKind"]> {
+    return this.#ownerClient.removeAutoApprovedActionKind(...(args as Parameters<Overseer["removeAutoApprovedActionKind"]>));
+  }
+  async removeCollaborator(...args: Parameters<Overseer["removeCollaborator"]>): ReturnType<Overseer["removeCollaborator"]> {
+    return this.#ownerClient.removeCollaborator(...(args as Parameters<Overseer["removeCollaborator"]>));
+  }
+  async retryAgent(...args: Parameters<Overseer["retryAgent"]>): ReturnType<Overseer["retryAgent"]> {
+    return this.#ownerClient.retryAgent(...(args as Parameters<Overseer["retryAgent"]>));
+  }
+  async retryBlueprintPublish(...args: Parameters<Overseer["retryBlueprintPublish"]>): ReturnType<Overseer["retryBlueprintPublish"]> {
+    return this.#ownerClient.retryBlueprintPublish(...(args as Parameters<Overseer["retryBlueprintPublish"]>));
+  }
+  async revertChanges(...args: Parameters<Overseer["revertChanges"]>): ReturnType<Overseer["revertChanges"]> {
+    return this.#ownerClient.revertChanges(...(args as Parameters<Overseer["revertChanges"]>));
+  }
+  async revokeShareLink(...args: Parameters<Overseer["revokeShareLink"]>): ReturnType<Overseer["revokeShareLink"]> {
+    return this.#ownerClient.revokeShareLink(...(args as Parameters<Overseer["revokeShareLink"]>));
+  }
+  async sendChatMessage(...args: Parameters<Overseer["sendChatMessage"]>): ReturnType<Overseer["sendChatMessage"]> {
+    return this.#ownerClient.sendChatMessage(...(args as Parameters<Overseer["sendChatMessage"]>));
+  }
+  async setAutoApprovedActionKind(...args: Parameters<Overseer["setAutoApprovedActionKind"]>): ReturnType<Overseer["setAutoApprovedActionKind"]> {
+    return this.#ownerClient.setAutoApprovedActionKind(...(args as Parameters<Overseer["setAutoApprovedActionKind"]>));
+  }
+  async setChatTitle(...args: Parameters<Overseer["setChatTitle"]>): ReturnType<Overseer["setChatTitle"]> {
+    return this.#ownerClient.setChatTitle(...(args as Parameters<Overseer["setChatTitle"]>));
+  }
+  async setPinned(...args: Parameters<Overseer["setPinned"]>): ReturnType<Overseer["setPinned"]> {
+    return this.#ownerClient.setPinned(...(args as Parameters<Overseer["setPinned"]>));
+  }
+  async setTitle(...args: Parameters<Overseer["setTitle"]>): ReturnType<Overseer["setTitle"]> {
+    return this.#ownerClient.setTitle(...(args as Parameters<Overseer["setTitle"]>));
+  }
+  async stopAgent(...args: Parameters<Overseer["stopAgent"]>): ReturnType<Overseer["stopAgent"]> {
+    return this.#ownerClient.stopAgent(...(args as Parameters<Overseer["stopAgent"]>));
+  }
+  async submitCodeChange(...args: Parameters<Overseer["submitCodeChange"]>): ReturnType<Overseer["submitCodeChange"]> {
+    return this.#ownerClient.submitCodeChange(...(args as Parameters<Overseer["submitCodeChange"]>));
+  }
+  async subscribeToActions(...args: Parameters<Overseer["subscribeToActions"]>): ReturnType<Overseer["subscribeToActions"]> {
+    return this.#ownerClient.subscribeToActions(...(args as Parameters<Overseer["subscribeToActions"]>));
+  }
+  async subscribeToChat(...args: Parameters<Overseer["subscribeToChat"]>): ReturnType<Overseer["subscribeToChat"]> {
+    return this.#ownerClient.subscribeToChat(...(args as Parameters<Overseer["subscribeToChat"]>));
+  }
+  async subscribeToConsoleLogs(...args: Parameters<Overseer["subscribeToConsoleLogs"]>): ReturnType<Overseer["subscribeToConsoleLogs"]> {
+    return this.#ownerClient.subscribeToConsoleLogs(...(args as Parameters<Overseer["subscribeToConsoleLogs"]>));
+  }
+  async subscribeToMetadata(...args: Parameters<Overseer["subscribeToMetadata"]>): ReturnType<Overseer["subscribeToMetadata"]> {
+    return this.#ownerClient.subscribeToMetadata(...(args as Parameters<Overseer["subscribeToMetadata"]>));
+  }
+  async subscribeToPresence(...args: Parameters<Overseer["subscribeToPresence"]>): ReturnType<Overseer["subscribeToPresence"]> {
+    return this.#ownerClient.subscribeToPresence(...(args as Parameters<Overseer["subscribeToPresence"]>));
+  }
+  async subscribeToWorkpieces(...args: Parameters<Overseer["subscribeToWorkpieces"]>): ReturnType<Overseer["subscribeToWorkpieces"]> {
+    return this.#ownerClient.subscribeToWorkpieces(...(args as Parameters<Overseer["subscribeToWorkpieces"]>));
+  }
+  async updateBlueprint(...args: Parameters<Overseer["updateBlueprint"]>): ReturnType<Overseer["updateBlueprint"]> {
+    return this.#ownerClient.updateBlueprint(...(args as Parameters<Overseer["updateBlueprint"]>));
+  }
+  async updateChatFromMainline(...args: Parameters<Overseer["updateChatFromMainline"]>): ReturnType<Overseer["updateChatFromMainline"]> {
+    return this.#ownerClient.updateChatFromMainline(...(args as Parameters<Overseer["updateChatFromMainline"]>));
+  }
+  async updateShareLink(...args: Parameters<Overseer["updateShareLink"]>): ReturnType<Overseer["updateShareLink"]> {
+    return this.#ownerClient.updateShareLink(...(args as Parameters<Overseer["updateShareLink"]>));
+  }
+  async uploadChatAttachment(...args: Parameters<Overseer["uploadChatAttachment"]>): ReturnType<Overseer["uploadChatAttachment"]> {
+    return this.#ownerClient.uploadChatAttachment(...(args as Parameters<Overseer["uploadChatAttachment"]>));
+  }
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
     let externalChat = this.impl.storage.externalChats.get(externalChatKey);
     if (externalChat && !this.impl.storage.chatMeta.get(externalChat.chatId)) {
