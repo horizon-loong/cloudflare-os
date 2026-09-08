@@ -3751,32 +3751,6 @@ function ChatInterface({
     };
   }, [overseer]);
 
-  // celld-port: the server->client subscription push doesn't survive on celld
-  // yet (RpcImportHook lifecycle), so live updates never arrive while the page
-  // is open. Poll history and replay it through the same idempotent subscriber
-  // handler the live path uses; new messages and agent replies appear within
-  // one interval regardless.
-  useEffect(() => {
-    if (selectedChatId === null || selectedChatId === undefined) return;
-    let busy = false;
-    const poll = async () => {
-      if (busy || document.hidden) return;
-      busy = true;
-      try {
-        const page = await overseer.getChatHistory(selectedChatId);
-        for (const msg of page.messages) {
-          subscriberRef.current.message(msg);
-        }
-      } catch {
-        // Transient (reconnects, restarts): the next tick retries.
-      } finally {
-        busy = false;
-      }
-    };
-    const timer = setInterval(poll, 3000);
-    void poll();
-    return () => clearInterval(timer);
-  }, [overseer, selectedChatId]);
 
   // Patch cached chat messages on action upserts.
   useActionEntries(overseer, (record) => {

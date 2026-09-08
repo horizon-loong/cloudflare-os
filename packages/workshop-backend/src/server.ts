@@ -819,14 +819,11 @@ export default {
     }
 
     if (url.pathname === "/api") {
-      // celld-port: WebSocket upgrades must be served from a Durable Object.
-      if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-        return env.ApiWsDurableObject.get(env.ApiWsDurableObject.idFromName("api")).fetch(req);
-      }
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
-      // and the DO is idempotent.
+      // and the DO is idempotent. (celld-port: runs BEFORE the WebSocket branch — the browser
+      // only ever hits /api over WS, so an install behind the upgrade return never fires.)
       if (!formatBlueprintInstallStarted) {
         formatBlueprintInstallStarted = true;
         ctx.waitUntil(env.AdminSettings.getByName("").ensureFormatBlueprintsInstalled()
@@ -844,6 +841,12 @@ export default {
                 event: "formats.install.trigger.failed", error: err,
               });
             }));
+      }
+
+      // celld-port: WebSocket upgrades must be served from a Durable Object.
+      // (Placed after the blueprint-install trigger above.)
+      if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        return env.ApiWsDurableObject.get(env.ApiWsDurableObject.idFromName("api")).fetch(req);
       }
 
       let accessPayload: JWTPayload | undefined;
