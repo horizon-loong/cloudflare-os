@@ -3476,29 +3476,63 @@ export async function runAgent(
     tools: toolList,
   };
 
-  await runAgentLoopContinue(context, {
-    model: handle.model,
-    // Replay already produces LLM-shaped messages; no custom message types exist.
-    convertToLlm: (messages) => messages as Message[],
-    toolExecution: "sequential",
-    maxTokens: maxOutputTokens,
-    shouldStopAfterTurn: () =>
-        // Cancelled during tool execution: the completed turn was persisted by the turn_end
-        // barrier just above; don't start another (doomed) model request.
-        abortSignal.aborted ||
-        // Hard cap on turns, as before.
-        ++turnCount >= 30 ||
-        // End the turn once the agent has successfully requested a connection: it must wait
-        // for the user to respond, not keep reasoning in the meantime. (Accept resumes it on a
-        // fresh turn; deny just leaves the turn ended.) A rejected requestConnection (e.g.
-        // unresolvable resource) leaves this false so the agent can fix the request and retry
-        // in the same turn.
-        connectionRequested ||
-        // Wait for approval before continuing against state that may not reflect the action.
-        awaitingActionDecision ||
-        // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
-        (callbackInitiated && hooks.activeAgentCallbackCount(chatId) === 0),
-  }, emit, abortSignal, handle.stream);
+  // Transport-failure forensics: a provider error arrives as a turn_end event
+  // (turnFailure above), but a stream cut mid-flight throws straight out of the
+  // loop. The event counts distinguish "no model bytes ever arrived" from
+  // "died mid-stream", which the error message alone cannot.
+  let modelEventsReceived = 0;
+  let firstModelEventMs: number | undefined;
+  let lastModelEventMs: number | undefined;
+  let lastModelEventType: string | undefined;
+  let loopStartedAt = Date.now();
+  let instrumentedEmit = async (event: AgentEvent): Promise<void> => {
+    modelEventsReceived++;
+    let elapsed = Date.now() - loopStartedAt;
+    firstModelEventMs ??= elapsed;
+    lastModelEventMs = elapsed;
+    lastModelEventType = event.type;
+    return emit(event);
+  };
+
+  try {
+    await runAgentLoopContinue(context, {
+      model: handle.model,
+      // Replay already produces LLM-shaped messages; no custom message types exist.
+      convertToLlm: (messages) => messages as Message[],
+      toolExecution: "sequential",
+      maxTokens: maxOutputTokens,
+      shouldStopAfterTurn: () =>
+          // Cancelled during tool execution: the completed turn was persisted by the turn_end
+          // barrier just above; don't start another (doomed) model request.
+          abortSignal.aborted ||
+          // Hard cap on turns, as before.
+          ++turnCount >= 30 ||
+          // End the turn once the agent has successfully requested a connection: it must wait
+          // for the user to respond, not keep reasoning in the meantime. (Accept resumes it on a
+          // fresh turn; deny just leaves the turn ended.) A rejected requestConnection (e.g.
+          // unresolvable resource) leaves this false so the agent can fix the request and retry
+          // in the same turn.
+          connectionRequested ||
+          // Wait for approval before continuing against state that may not reflect the action.
+          awaitingActionDecision ||
+          // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
+          (callbackInitiated && hooks.activeAgentCallbackCount(chatId) === 0),
+    }, instrumentedEmit, abortSignal, handle.stream);
+  } catch (error) {
+    logger.error("model stream failed mid-loop", {
+      event: "agent.stream.transport_error",
+      chatId,
+      modelId: handle.model.id,
+      elapsedMs: Date.now() - loopStartedAt,
+      modelEventsReceived,
+      firstModelEventMs: firstModelEventMs ?? -1,
+      lastModelEventMs: lastModelEventMs ?? -1,
+      lastModelEventType: lastModelEventType ?? "none",
+      httpStatus: handle.lastResponse?.status ?? -1,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 
   // (No end-of-turn flush: every completed step's effects were barrier-committed with its
   // message, and an abort simply drops the in-flight step's buffer -- nothing durable exists
