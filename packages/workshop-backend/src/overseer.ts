@@ -1386,6 +1386,22 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      // Platform-managed realtime watches: one row per (chat, gadget) the agent has declared
+      // interactive intent on via the watchGadget tool. The overseer owns the subscription
+      // lifecycle from here -- registering a fresh AgentSelfLoopback at every turn end so the
+      // agent can never strand itself by unsubscribing without re-registering (the 飞行棋
+      // failure mode), and expiring rows that have gone idle so nobody is followed forever.
+      gadgetWatches: collection<{
+        chatId: number,
+        gadgetId: WorkpieceId,
+        bindingName: string,
+        lastActivityAt: number,
+      }>()({
+        primaryKey(entry) {
+          return `${keyString(entry.chatId)}.${keyString(entry.gadgetId)}`;
+        }
+      }),
+
       // Model-facing snapshots of agent steps, replayed verbatim on later turns so reasoning
       // (including provider-opaque signatures) and true model provenance survive turn boundaries
       // and restarts. Stored separately from the chat messages so these payloads -- opaque and
@@ -7191,6 +7207,14 @@ class OverseerImpl implements AgentHooks {
         event: "agent.run.finished", outcome,
         durationMs: Date.now() - startedAt,
       });
+
+      // Turn-end re-assert of platform-managed gadget watches (see watchGadget): after a
+      // successful turn is the moment an agent's own subscribe/unsubscribe churn is settled,
+      // so the platform restores the intended invariant here. Never blocks the turn.
+      this.ctx.waitUntil(this.#reassertGadgetWatches(chatId, initiator, aiModel.profile.id)
+          .catch(err => this.logger.warn("gadget watch re-assert crashed", {
+            event: "gadget.watch.reassert.crashed", chatId, error: err,
+          })));
     } catch (err: unknown) {
       // A failed model request surfaces as AgentTurnError (pi reports provider failures as data;
       // runAgent converts them back to a throw), carrying the failing request's HTTP status when
@@ -7342,6 +7366,105 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Called by AgentSelfLoopback when any method is called on the `self` object.
+  // ---- Platform-managed realtime gadget watches -------------------------------------------
+  //
+  // The watchGadget/unwatchGadget agent tools delegate here. The overseer, not the agent,
+  // owns the subscription lifecycle: while a watch row exists, every agent turn end re-asserts
+  // the gadget's subscribeAgent() with a freshly minted loopback, so the agent cannot strand
+  // itself by unsubscribing (or resetting the game) without re-registering. Rows expire after
+  // GADGET_WATCH_IDLE_MS without activity, so an abandoned session stops being followed.
+
+  #GADGET_WATCH_IDLE_MS = 30 * 60 * 1000;
+
+  async #mintWatchStub(chatId: number, initiatorUserId: string, initiatorModelId: string) {
+    return this.ctx.exports.AgentSelfLoopback({props: {
+      overseerId: this.ctx.id.toString(),
+      chatId,
+      initiatorUserId,
+      initiatorModelId,
+    }});
+  }
+
+  async watchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string,
+                    initiator: AiChatAuthorInfo, initiatorModelId: string): Promise<string> {
+    if (!this.storage.gadgets.get(gadgetId)) {
+      throw new Error(`There is no gadget "${bindingName}" in this workspace.`);
+    }
+    let initiatorUserId = this.users.idFromName(initiator.id).toString();
+    let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
+    if (typeof facet.subscribeAgent !== "function") {
+      throw new Error(
+          `Gadget "${bindingName}" does not expose subscribeAgent(callback). Give its server.js ` +
+          `a subscribeAgent(cb) method that stores the callback (ctx.storage.put) and calls it ` +
+          `on every user-driven state change, then retry.`);
+    }
+    await facet.subscribeAgent(await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId));
+    this.storage.gadgetWatches.put({chatId, gadgetId, bindingName, lastActivityAt: Date.now()});
+    this.logger.info("gadget watch registered", {
+      event: "gadget.watch.registered", chatId, gadgetId,
+    });
+    return `Watching "${bindingName}" in real time. Its state changes will wake this chat; ` +
+        `the platform keeps the subscription alive. Call unwatchGadget to stop following it.`;
+  }
+
+  async unwatchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string): Promise<string> {
+    this.storage.gadgetWatches.delete({chatId, gadgetId});
+    try {
+      let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
+      if (typeof facet.unsubscribeAgent === "function") await facet.unsubscribeAgent();
+    } catch (err) {
+      // The gadget may be gone or not expose unsubscribe; the watch row is gone either way.
+      this.logger.warn("gadget watch unsubscribe best-effort failed", {
+        event: "gadget.watch.unsubscribe.failed", chatId, gadgetId, error: err,
+      });
+    }
+    this.logger.info("gadget watch removed", {
+      event: "gadget.watch.removed", chatId, gadgetId,
+    });
+    return `Stopped following "${bindingName}". You will not be woken by its changes anymore.`;
+  }
+
+  /** Renewed on any delivered callback and at every turn end; expiry unwatch happens here. */
+  #touchGadgetWatches(chatId: number) {
+    for (let watch of this.storage.gadgetWatches.list({prefix: `${keyString(chatId)}.`})) {
+      watch.lastActivityAt = Date.now();
+      this.storage.gadgetWatches.put(watch);
+    }
+  }
+
+  /**
+   * Re-assert every live watch of the chat with a fresh loopback stub, expiring rows idle
+   * past the threshold. Called at each agent turn end; failures are logged, never thrown —
+   * a broken re-assert must not fail the turn that already succeeded.
+   */
+  async #reassertGadgetWatches(chatId: number, initiator: AiChatAuthorInfo,
+                               initiatorModelId: string): Promise<void> {
+    let watches = [...this.storage.gadgetWatches.list({prefix: `${keyString(chatId)}.`})];
+    if (watches.length === 0) return;
+    let initiatorUserId = this.users.idFromName(initiator.id).toString();
+    for (let watch of watches) {
+      try {
+        if (Date.now() - watch.lastActivityAt > this.#GADGET_WATCH_IDLE_MS) {
+          this.storage.gadgetWatches.delete({chatId, gadgetId: watch.gadgetId});
+          this.logger.info("gadget watch expired idle", {
+            event: "gadget.watch.expired", chatId, gadgetId: watch.gadgetId,
+          });
+          continue;
+        }
+        let facet =
+            await this.getGadgetFacet(watch.gadgetId, chatId) as unknown as NativeRpcStub<any>;
+        if (typeof facet.subscribeAgent === "function") {
+          await facet.subscribeAgent(
+              await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId));
+        }
+      } catch (err) {
+        this.logger.warn("gadget watch re-assert failed", {
+          event: "gadget.watch.reassert.failed", chatId, gadgetId: watch.gadgetId, error: err,
+        });
+      }
+    }
+  }
+
   async deliverAgentCallback(
       chatId: number, methodName: string, args: unknown[],
       initiatorUserId: string, initiatorModelId: string): Promise<unknown> {
@@ -7352,6 +7475,11 @@ class OverseerImpl implements AgentHooks {
 
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) throw new Error("No such chatId: " + chatId);
+
+    // A delivered callback is proof the interactive session is alive: renew the idle
+    // deadline of every watch on this chat (the source gadget isn't identifiable here,
+    // and a chat watches few gadgets, so renewing all of them is the right grain).
+    this.#touchGadgetWatches(chatId);
 
     // Register this callback in the pending callbacks for the chat.
     let liveChat = this.#getLiveChat(chatId);

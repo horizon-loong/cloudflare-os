@@ -557,6 +557,18 @@ export interface AgentHooks {
                    onOutputText?: (delta: string) => void,
                    worktreeTurn?: WorktreeTurnAccess): Promise<string>;
   activeAgentCallbackCount(chatId: number): number;
+
+  /**
+   * Platform-managed realtime watch on a gadget: the overseer registers a fresh
+   * AgentSelfLoopback with the gadget's subscribeAgent() and re-asserts it at every
+   * subsequent turn end, so the chat is woken by the gadget's user-driven state changes
+   * without the agent maintaining any subscription lifecycle itself.
+   */
+  watchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string,
+              initiator: AiChatAuthorInfo, initiatorModelId: string): Promise<string>;
+
+  /** Drop a realtime watch (and best-effort unsubscribe the gadget). */
+  unwatchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string): Promise<string>;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number)
       : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined;
@@ -757,7 +769,7 @@ If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:worke
 
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* REAL-TIME FIRST whenever the user shows any intent to interact with a Gadget while you stay involved — not just games, but co-editing a document, filling a form you assist with, watching a dashboard and commenting, drawing, taking turns in any workflow, "我们一起…/陪我…/我试试你来…/real-time/together" or simply the user saying they will click/operate the UI and expecting you to follow along. Besides the client subscriptions above, register YOURSELF as a listener: give the Gadget a subscribe-style RPC that accepts a callback, and call it from \`executeCode\` passing \`self\` (see the executeCode tool description). From then on every user action in the UI changes the Gadget state, which calls you back and wakes you to respond — the conversation continues without the user typing anything. NEVER ask the user to "tell me in chat when you've done X" or similar: if the user's next action will happen in the UI rather than in chat, your \`self\` subscription is what keeps the session going. Set this up proactively the moment interactive intent appears, and re-register whenever the interaction restarts or the stored callback breaks.
+* REAL-TIME FIRST whenever the user shows any intent to interact with a Gadget while you stay involved — not just games, but co-editing a document, filling a form you assist with, watching a dashboard and commenting, drawing, taking turns in any workflow, "我们一起…/陪我…/我试试你来…/real-time/together" or simply the user saying they will click/operate the UI and expecting you to follow along. Use the \`watchGadget\` tool: the platform then subscribes this chat to the Gadget and KEEPS the subscription alive on its own — every user action in the UI wakes you to respond, and the user never has to type a notification. The Gadget's server.js needs a \`subscribeAgent(cb)\` method that stores the callback in Durable Object storage and invokes it on every user-driven state change (plus getState(); write these when creating any interactive Gadget). NEVER ask the user to "tell me in chat when you've done X": if their next action happens in the UI, \`watchGadget\` is what keeps the session going. When the session ends or you hand control to the Gadget's own automation, call \`unwatchGadget\` — do not unsubscribe any other way.
 * Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
 * If a Gadget contains a README.md file, use it to describe that Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 
@@ -978,7 +990,15 @@ When the user asks you to just do a task that can be done with these bindings, y
 
 The function also receives a \`self\` parameter which is a magic object that points back to this chat thread. Calling any method on \`self\`, like \`self.foo(123)\`, delivers a callback message to this chat and activates you to respond. \`self\` can be passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV storage for long-term callbacks. When an agent callback is received, it appears in your env under a name like \`PARAMS_1\`, with \`.args\` (the callback arguments), \`.resolve(value)\` (to return a value to the caller), and \`.reject(error)\` (to reject with an error).
 
-\`self\` is the mechanism for real-time collaboration with the user. Whenever the user intends to interact with a Gadget while you stay involved — playing a game together, co-editing, operating a UI you watch or assist with, any workflow where their next action happens in the UI rather than in chat — immediately set up a \`self\` subscription: have the Gadget store the callback and invoke it on every user-driven state change, then register with it from \`executeCode\` by passing \`self\` to the Gadget's subscribe-style RPC. After that, the user's UI actions wake you automatically. Do not wait for the user to say "real-time" explicitly, and never tell the user to notify you in chat after each action — if you catch yourself writing "走完告诉我" / "tell me when you've moved" / "弄好了说一声", subscribe with \`self\` instead.
+\`self\` underlies the platform's realtime collaboration, but you do not manage subscriptions with it by hand: call the \`watchGadget\` tool and the platform registers, maintains, and re-asserts the subscription for you (see the system prompt's design tips). Passing \`self\` to a Gadget's subscribe-style RPC yourself still works, but the platform's turn-end upkeep only covers watches established through the tool — so prefer the tool.
+`.trim();
+
+let WATCH_GADGET_TOOL_DESCRIPTION = `
+Declare that this chat should follow a Gadget in real time. The platform subscribes itself to the Gadget (via its subscribeAgent(callback) RPC) and keeps the subscription alive: from then on, whenever the Gadget's state changes because the user acted in its UI, you are woken to respond — the user never has to type a notification. Call this ONCE as soon as interactive intent appears (playing a game together, co-editing, the user operating a UI you assist with, any workflow where their next action happens in the UI rather than in chat). The Gadget's server.js must expose subscribeAgent(cb) that stores the callback in Durable Object storage and invokes it on every user-driven state change; if it does not, this tool's error says how to add it. To stop following (the user says stop, or you hand control to the Gadget's built-in AI), call unwatchGadget — do NOT call the Gadget's unsubscribeAgent yourself; the platform would re-subscribe you at the end of the turn.
+`.trim();
+
+let UNWATCH_GADGET_TOOL_DESCRIPTION = `
+Stop following a Gadget in real time (undoes watchGadget): the platform unsubscribes and you will no longer be woken by this Gadget's changes. Use it when the user ends the interactive session ("我自己来/你别跟了"), when you hand the Gadget's control to its own built-in automation, or when the interaction is clearly over. The user can re-establish realtime collaboration later by asking; you would then call watchGadget again.
 `.trim();
 
 let LIST_CONNECTABLE_RESOURCES_TOOL_DESCRIPTION = `
@@ -1929,6 +1949,12 @@ export async function runAgent(
                 case "requestConnection":
                   toolOutput = {text: toolCall.output ?? ""};
                   break;
+                case "watchGadget":
+                case "unwatchGadget":
+                  // The live call already registered/removed the platform-managed watch;
+                  // the watch's own turn-end upkeep keeps it consistent from here.
+                  toolOutput = {text: toolCall.output ?? ""};
+                  break;
                 default:
                   toolCall satisfies never;
                   throw new Error("Unknown tool.");
@@ -2594,6 +2620,54 @@ export async function runAgent(
   });
 
   let tools: Record<string, AgentTool> = {
+    watchGadget: defineTool({
+      name: "watchGadget",
+      label: "Watch gadget in real time",
+      description: WATCH_GADGET_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        gadget: Type.String({
+          description:
+              "Name of the Gadget binding in your env to follow (e.g. \"FLYING_CHESS\").",
+        }),
+      }),
+      execute: async (toolCallId, {gadget}) => {
+        try {
+          let entry = chatBindings.get(`${gadget}`);
+          if (!entry) throw new Error(`There is no binding named "${gadget}" in your env.`);
+          if (entry.type !== "workpiece") {
+            throw new Error(`"${gadget}" is not a Gadget (only Gadget bindings can be watched).`);
+          }
+          return toolResult(await hooks.watchGadget(
+              chatId, entry.id, `${gadget}`, initiator, author.id));
+        } catch (error) {
+          return toolResult(`watchGadget failed: ${error instanceof Error ? error.message : String(error)}`, {isError: true});
+        }
+      }
+    }),
+
+    unwatchGadget: defineTool({
+      name: "unwatchGadget",
+      label: "Stop watching gadget",
+      description: UNWATCH_GADGET_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        gadget: Type.String({
+          description: "Name of the Gadget binding to stop following.",
+        }),
+      }),
+      execute: async (toolCallId, {gadget}) => {
+        try {
+          let entry = chatBindings.get(`${gadget}`);
+          if (!entry) throw new Error(`There is no binding named "${gadget}" in your env.`);
+          if (entry.type !== "workpiece") {
+            throw new Error(`"${gadget}" is not a Gadget.`);
+          }
+          return toolResult(await hooks.unwatchGadget(chatId, entry.id, `${gadget}`));
+        } catch (error) {
+          return toolResult(`unwatchGadget failed: ${error instanceof Error ? error.message : String(error)}`, {isError: true});
+        }
+      }
+    }),
+
     readFile: defineTool({
       name: "readFile",
       label: "Read file",
