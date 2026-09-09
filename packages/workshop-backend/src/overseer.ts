@@ -7492,7 +7492,12 @@ class OverseerImpl implements AgentHooks {
     // The stop came from the user's UI, not from the agent, so the agent has no idea its
     // wake-up channel is gone. Record the fact in the chat log: the next turn (and every
     // replay) sees it, so "let's keep playing" resolves to watchGadget instead of silence.
-    if (watch.initiator) {
+    // Only inject the note when no turn is running: appending mid-turn desyncs the live
+    // turn's bookkeeping (the reason deliverAgentCallback queues callbacks rather than
+    // appending messages). A mid-turn stop is still effective -- the watch row is gone and
+    // the turn-end re-assert skips it -- and the agent re-establishes on the next "resume"
+    // request even without the note.
+    if (watch.initiator && !this.storage.chatMeta.get(chatId)?.activeAgent) {
       this.addChatMessages(chatId, watch.initiator, [{
         type: "agentNudge",
         text: `Realtime following of "${watch.bindingName}" was stopped by the user. You are ` +
@@ -7535,7 +7540,7 @@ class OverseerImpl implements AgentHooks {
                   () => facet.unsubscribeAgent());
             }
           } catch { /* best-effort */ }
-          if (watch.initiator) {
+          if (watch.initiator && !this.storage.chatMeta.get(chatId)?.activeAgent) {
             this.addChatMessages(chatId, watch.initiator, [{
               type: "agentNudge",
               text: `Realtime following of "${watch.bindingName}" stopped automatically ` +
