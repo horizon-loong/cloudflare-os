@@ -1397,6 +1397,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         bindingName: string,
         lastActivityAt: number,
         initiator?: AiChatAuthorInfo,
+        initiatorModelId?: string,
       }>()({
         primaryKey(entry) {
           return `${keyString(entry.chatId)}.${keyString(entry.gadgetId)}`;
@@ -7376,6 +7377,50 @@ class OverseerImpl implements AgentHooks {
   // GADGET_WATCH_IDLE_MS without activity, so an abandoned session stops being followed.
 
   #GADGET_WATCH_IDLE_MS = 30 * 60 * 1000;
+  /** How often the alarm re-asserts watches. A gadget may keep its agent subscription
+   *  in memory only, and an idle-evicted isolate silently drops it -- the turn-end
+   *  re-assert never fires because no callback arrives to start a turn. The heartbeat
+   *  breaks that cycle: while any watch row exists, the subscription is restored on a
+   *  timer, with or without agent activity. */
+  #WATCH_HEARTBEAT_MS = 60 * 1000;
+
+  async #scheduleWatchHeartbeat(): Promise<void> {
+    let existing = await this.ctx.storage.getAlarm();
+    let next = Date.now() + this.#WATCH_HEARTBEAT_MS;
+    if (existing !== null && existing < next) return; // Keep an earlier deadline.
+    await this.ctx.storage.setAlarm(next);
+  }
+
+  /** Alarm entry: re-assert every watch of this workspace; renew while any remain. */
+  async heartbeatGadgetWatches(): Promise<void> {
+    let watches = [...this.storage.gadgetWatches.list({})];
+    if (watches.length === 0) return;
+    for (let watch of watches) {
+      try {
+        if (!watch.initiator || !watch.initiatorModelId) continue;
+        if (Date.now() - watch.lastActivityAt > this.#GADGET_WATCH_IDLE_MS) {
+          this.storage.gadgetWatches.delete(
+              `${keyString(watch.chatId)}.${keyString(watch.gadgetId)}`);
+          continue;
+        }
+        let facet = await this.getGadgetFacet(watch.gadgetId, watch.chatId) as unknown as NativeRpcStub<any>;
+        if (typeof facet.subscribeAgent === "function") {
+          let initiatorUserId =
+              this.users.idFromName(watch.initiator.id).toString();
+          let stub = await this.#mintWatchStub(
+              watch.chatId, initiatorUserId, watch.initiatorModelId);
+          await this.#guardedGadgetCall(facet, "subscribeAgent", 10_000,
+              () => facet.subscribeAgent(stub));
+        }
+      } catch (err) {
+        this.logger.warn("gadget watch heartbeat failed", {
+          event: "gadget.watch.heartbeat.failed", chatId: watch.chatId,
+          gadgetId: watch.gadgetId, error: err,
+        });
+      }
+    }
+    await this.#scheduleWatchHeartbeat();
+  }
 
   /** The execution id currently running on a chat's agent turn (see AgentSelfLoopbackProps). */
   #activeExecutions = new Map<number, string>();
@@ -7451,7 +7496,9 @@ class OverseerImpl implements AgentHooks {
     }
     this.storage.gadgetWatches.put({
       chatId, gadgetId, bindingName, lastActivityAt: Date.now(), initiator,
+      initiatorModelId,
     });
+    await this.#scheduleWatchHeartbeat();
     this.logger.info("gadget watch registered", {
       event: "gadget.watch.registered", chatId, gadgetId,
     });
@@ -7524,6 +7571,8 @@ class OverseerImpl implements AgentHooks {
                                initiatorModelId: string): Promise<void> {
     let watches = [...this.storage.gadgetWatches.list({prefix: `${keyString(chatId)}.`})];
     if (watches.length === 0) return;
+    // Arm the heartbeat for rows that predate per-registration scheduling too.
+    await this.#scheduleWatchHeartbeat();
     let initiatorUserId = this.users.idFromName(initiator.id).toString();
     for (let watch of watches) {
       try {
@@ -10078,6 +10127,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async alarm() {
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
+    await this.impl.heartbeatGadgetWatches();
   }
 
   // celld-port: DO-level pass-throughs for the workspace chat surface. celld's
