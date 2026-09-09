@@ -177,6 +177,18 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') void probeOnWake();
 });
 window.addEventListener('online', () => void probeOnWake());
+// A socket can die without the browser ever delivering a close event to the
+// page (tab throttling, OS sleep transitions, and mid-run click storms have
+// all produced zombie sessions): the UI then freezes on stale state until a
+// manual reload, because nothing pings. Probe on user interaction — the
+// cheapest moment to notice — throttled by WAKE_PROBE_MIN_IDLE_MS like the
+// wake path, so a zombie converts into a reconnect within one click instead
+// of hanging the user's next action.
+document.addEventListener('pointerdown', () => void probeOnWake(), { passive: true, capture: true });
+document.addEventListener('keydown', () => void probeOnWake(), { passive: true, capture: true });
+// And a periodic heartbeat for the case nobody interacts for a while: an
+// idle zombie still heals within one interval.
+setInterval(() => { if (!document.hidden) void probeOnWake(); }, WAKE_PROBE_MIN_IDLE_MS);
 
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
