@@ -54,7 +54,7 @@ import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { GadgetExportFormat, GadgetWatchInfo } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -7408,7 +7408,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   async unwatchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string): Promise<string> {
-    this.storage.gadgetWatches.delete({chatId, gadgetId});
+    this.storage.gadgetWatches.delete(`${keyString(chatId)}.${keyString(gadgetId)}`);
     try {
       let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
       if (typeof facet.unsubscribeAgent === "function") await facet.unsubscribeAgent();
@@ -7422,6 +7422,18 @@ class OverseerImpl implements AgentHooks {
       event: "gadget.watch.removed", chatId, gadgetId,
     });
     return `Stopped following "${bindingName}". You will not be woken by its changes anymore.`;
+  }
+
+  listGadgetWatches(chatId?: number): GadgetWatchInfo[] {
+    let prefix = chatId === undefined ? "" : `${keyString(chatId)}.`;
+    return [...this.storage.gadgetWatches.list(prefix ? {prefix} : {})];
+  }
+
+  async stopGadgetWatch(chatId: number, gadgetId: WorkpieceId): Promise<void> {
+    let watch = this.storage.gadgetWatches.list({prefix: `${keyString(chatId)}.`})
+        .find(w => w.gadgetId === gadgetId);
+    if (!watch) return;
+    await this.unwatchGadget(chatId, gadgetId, watch.bindingName);
   }
 
   /** Renewed on any delivered callback and at every turn end; expiry unwatch happens here. */
@@ -7445,7 +7457,8 @@ class OverseerImpl implements AgentHooks {
     for (let watch of watches) {
       try {
         if (Date.now() - watch.lastActivityAt > this.#GADGET_WATCH_IDLE_MS) {
-          this.storage.gadgetWatches.delete({chatId, gadgetId: watch.gadgetId});
+          this.storage.gadgetWatches.delete(
+              `${keyString(chatId)}.${keyString(watch.gadgetId)}`);
           this.logger.info("gadget watch expired idle", {
             event: "gadget.watch.expired", chatId, gadgetId: watch.gadgetId,
           });
@@ -10295,6 +10308,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async listChats(...args: Parameters<Overseer["listChats"]>): ReturnType<Overseer["listChats"]> {
     return this.#ownerClient.listChats(...(args as Parameters<Overseer["listChats"]>));
   }
+  async listGadgetWatches(...args: Parameters<Overseer["listGadgetWatches"]>): ReturnType<Overseer["listGadgetWatches"]> {
+    return this.#ownerClient.listGadgetWatches(...(args as Parameters<Overseer["listGadgetWatches"]>));
+  }
+  async stopGadgetWatch(...args: Parameters<Overseer["stopGadgetWatch"]>): ReturnType<Overseer["stopGadgetWatch"]> {
+    return this.#ownerClient.stopGadgetWatch(...(args as Parameters<Overseer["stopGadgetWatch"]>));
+  }
   async listCollaborators(...args: Parameters<Overseer["listCollaborators"]>): ReturnType<Overseer["listCollaborators"]> {
     return this.#ownerClient.listCollaborators(...(args as Parameters<Overseer["listCollaborators"]>));
   }
@@ -12054,6 +12073,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#clientUser.listModels(), this.impl.logger);
+  }
+
+  async listGadgetWatches(chatId?: number): Promise<GadgetWatchInfo[]> {
+    return this.impl.listGadgetWatches(chatId);
+  }
+
+  async stopGadgetWatch(chatId: number, gadgetId: WorkpieceId): Promise<void> {
+    await this.impl.stopGadgetWatch(chatId, gadgetId);
   }
 
   async listSlashCommands(): Promise<SlashCommandChoice[]> {

@@ -1634,6 +1634,18 @@ export type AgentSpawnerConfig = {
  * blueprint listing. Per-gadget operations live on the GadgetClient sub-capability (see
  * createGadget()/getGadget()).
  */
+/**
+ * A platform-managed realtime watch on a gadget (established by the agent's watchGadget tool):
+ * while it exists, the overseer keeps the chat subscribed to the gadget's state changes and the
+ * agent is woken to respond. The user-facing off switch is Overseer.stopGadgetWatch().
+ */
+export type GadgetWatchInfo = {
+  chatId: number;
+  gadgetId: WorkpieceId;
+  bindingName: string;
+  lastActivityAt: number;
+};
+
 export interface Overseer extends RpcTarget {
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
@@ -1661,6 +1673,18 @@ export interface Overseer extends RpcTarget {
 
   /** Pin or unpin this workspace in the user's list. */
   setPinned(pinned: boolean): Promise<void>;
+
+  /**
+   * List the platform-managed realtime gadget watches (optionally only one chat's). Used by the
+   * chat UI to show the "AI is following <gadget> in real time" status strip.
+   */
+  listGadgetWatches(chatId?: number): Promise<GadgetWatchInfo[]>;
+
+  /**
+   * User-facing off switch for realtime following: removes the watch and unsubscribes the gadget.
+   * The agent is not involved; it stops being woken by this gadget's changes.
+   */
+  stopGadgetWatch(chatId: number, gadgetId: WorkpieceId): Promise<void>;
 
   /**
    * Instruct the workspace to delete itself, removing it from the User's workspace list and

@@ -80,6 +80,7 @@ import {
   ChatAttachmentRef,
   ChatCodeBase,
   WorkpieceId,
+  GadgetWatchInfo,
   BlueprintOutput,
   MessageFormatRef,
 } from "@gadgets/workshop-shared/api";
@@ -2615,6 +2616,33 @@ function ChatInterface({
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
   const getOverseer = useCallback(() => overseer, [overseer]);
+
+  // Platform-managed realtime gadget watches for the open chat (the agent's watchGadget tool).
+  // Refreshed on chat switch, periodically, and after messages arrive (a watch can be
+  // established or removed by any agent turn).
+  const [gadgetWatches, setGadgetWatches] = useState<GadgetWatchInfo[]>([]);
+  const refreshGadgetWatches = useCallback(async () => {
+    if (selectedChatId === null) { setGadgetWatches([]); return; }
+    try {
+      setGadgetWatches(await overseer.listGadgetWatches(selectedChatId));
+    } catch {
+      // Non-critical status surface; leave the previous value on failure.
+    }
+  }, [overseer, selectedChatId]);
+  useEffect(() => {
+    void refreshGadgetWatches();
+    let timer = setInterval(() => void refreshGadgetWatches(), 30_000);
+    return () => clearInterval(timer);
+  }, [refreshGadgetWatches]);
+  const handleStopWatch = useCallback(async (gadgetId: number) => {
+    if (selectedChatId === null) return;
+    try {
+      await overseer.stopGadgetWatch(selectedChatId, gadgetId);
+    } catch (err) {
+      reportIssue('chat.watch.stop', err instanceof Error ? err : new Error(String(err)));
+    }
+    await refreshGadgetWatches();
+  }, [overseer, selectedChatId, refreshGadgetWatches]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -5400,6 +5428,34 @@ function ChatInterface({
                   >
                     <Trash size={14} />
                   </WorkshopIconButton>
+                </div>
+              )}
+
+              {/* Realtime watch status strip: platform-managed following (see watchGadget). */}
+              {gadgetWatches.length > 0 && (
+                <div className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-kumo-line bg-kumo-tint/60 px-4 py-2">
+                  <span className="flex items-center gap-1.5 text-[12px] leading-4 font-medium text-kumo-default">
+                    <span className="relative flex h-2 w-2" aria-hidden="true">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                    </span>
+                    Following in real time:
+                  </span>
+                  {gadgetWatches.map((watch) => (
+                    <span
+                      key={watch.gadgetId}
+                      className="flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 py-0.5 pl-2 pr-1 text-[12px] leading-4 text-kumo-default"
+                    >
+                      {watch.bindingName}
+                      <button
+                        onClick={() => void handleStopWatch(watch.gadgetId)}
+                        className="rounded-full px-1.5 py-px text-[11px] font-medium text-kumo-subtle hover:bg-emerald-500/20 hover:text-kumo-default"
+                        title={`Stop following ${watch.bindingName}`}
+                      >
+                        Stop
+                      </button>
+                    </span>
+                  ))}
                 </div>
               )}
 
