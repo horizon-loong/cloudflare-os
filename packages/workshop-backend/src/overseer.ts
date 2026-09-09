@@ -4919,6 +4919,58 @@ class OverseerImpl implements AgentHooks {
   // If `chatId` is specified, load the worker from that chat's code doc instead, including its
   // proposed changes. (The caller is presumed to have verified the chat exists and has proposed
   // changes.)
+  static readonly GADGET_KIT_MODULE = `
+// Platform-provided realtime watch machinery (injected by the Workshop loader).
+// Gadgets extend WatchableGadget and call this.notifyAgents(state) after each
+// user-driven state change. Registration, persistence, isolate-eviction recovery,
+// and cleanup are handled here and by the platform's watch upkeep -- never
+// implement subscribeAgent yourself.
+import { DurableObject } from "cloudflare:workers";
+
+const AGENT_SUB_KEY = "__agentSub";
+
+export class WatchableGadget extends DurableObject {
+  #agents = new Set();
+  #loaded = false;
+
+  async #ensureAgents() {
+    if (this.#loaded) return;
+    this.#loaded = true;
+    try {
+      const stored = await this.ctx.storage.get(AGENT_SUB_KEY);
+      if (stored) this.#agents.add(stored);
+    } catch (e) { /* storage unavailable: degrade to memory-only */ }
+  }
+
+  async subscribeAgent(cb) {
+    await this.#ensureAgents();
+    const d = cb.dup();
+    this.#agents.add(d);
+    try { d.onRpcBroken(() => { this.#agents.delete(d); }); } catch (e) {}
+    try { await this.ctx.storage.put(AGENT_SUB_KEY, d); } catch (e) {}
+    return true;
+  }
+
+  async unsubscribeAgent() {
+    this.#agents.clear();
+    this.#loaded = true;
+    try { await this.ctx.storage.delete(AGENT_SUB_KEY); } catch (e) {}
+    return true;
+  }
+
+  // The one verb a gadget uses: fire-and-forget notification after each
+  // user-driven state change. Deliberately does NOT await the callback -- an
+  // awaited agent callback inside a gadget method can re-enter the agent turn
+  // that called it and deadlock.
+  async notifyAgents(state) {
+    await this.#ensureAgents();
+    for (const cb of [...this.#agents]) {
+      try { cb.update(state).catch(() => {}); } catch (e) { this.#agents.delete(cb); }
+    }
+  }
+}
+`;
+
   loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number): WorkerStub {
     rpcDebugLog(`[celld-dbg] loadGadgetWorker gadgetId=${gadgetId} chatId=${chatId} LOADER=${typeof this.env.LOADER}`);
     let codeVersion = `${this.storage.codeVersion.get()}`;
@@ -4961,6 +5013,9 @@ class OverseerImpl implements AgentHooks {
           modules[file] = content;
         }
       }
+      // Platform kit: importable as `import { WatchableGadget } from "./gadget-kit.js"`.
+      // The name is platform-owned; a gadget file of the same name is overridden.
+      modules["gadget-kit.js"] = OverseerImpl.GADGET_KIT_MODULE;
 
       let tailProps: GadgetTailLoopbackProps = {
         chatId,
@@ -7481,9 +7536,10 @@ class OverseerImpl implements AgentHooks {
     this.#activeExecutions.set(chatId, executionId);
     if (typeof facet.subscribeAgent !== "function") {
       throw new Error(
-          `Gadget "${bindingName}" does not expose subscribeAgent(callback). Give its server.js ` +
-          `a subscribeAgent(cb) method that stores the callback (ctx.storage.put) and calls it ` +
-          `on every user-driven state change, then retry.`);
+          `Gadget "${bindingName}" does not expose subscribeAgent(callback). Its server.js must ` +
+          `extend the platform kit: import { WatchableGadget } from "./gadget-kit.js"; export ` +
+          `class Gadget extends WatchableGadget — and call this.notifyAgents(snapshot) after ` +
+          `each user-driven state change. Apply that and retry.`);
     }
     let selfStub = await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId, executionId);
     try {
