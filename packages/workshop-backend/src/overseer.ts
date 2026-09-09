@@ -7377,12 +7377,46 @@ class OverseerImpl implements AgentHooks {
 
   #GADGET_WATCH_IDLE_MS = 30 * 60 * 1000;
 
-  async #mintWatchStub(chatId: number, initiatorUserId: string, initiatorModelId: string) {
+  /** The execution id currently running on a chat's agent turn (see AgentSelfLoopbackProps). */
+  #activeExecutions = new Map<number, string>();
+  #turnExecutionId(chatId: number): string | undefined {
+    return this.#activeExecutions.get(chatId);
+  }
+
+  /**
+   * A gadget's subscribeAgent/unsubscribeAgent is model-generated code and has
+   * hung whole agent turns (a wedged write inside it once held the handler
+   * until the 300s budget killed it). The watch machinery therefore never
+   * awaits one unbounded: on timeout the operation fails with guidance
+   * instead of freezing the turn that triggered it.
+   */
+  async #guardedGadgetCall<T>(gadget: NativeRpcStub<any>, method: string,
+                              timeoutMs: number, run: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+              `Gadget method ${method}() did not return within ${Math.round(timeoutMs / 1000)}s. ` +
+              `Check its server.js for an await that never settles (e.g. a storage write or ` +
+              `an inner RPC), and that subscribeAgent stores the callback via cb.dup() without ` +
+              `unbounded awaits.`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  async #mintWatchStub(chatId: number, initiatorUserId: string, initiatorModelId: string,
+                      executionId?: string) {
     return this.ctx.exports.AgentSelfLoopback({props: {
       overseerId: this.ctx.id.toString(),
       chatId,
       initiatorUserId,
       initiatorModelId,
+      executionId,
     }});
   }
 
@@ -7393,13 +7427,28 @@ class OverseerImpl implements AgentHooks {
     }
     let initiatorUserId = this.users.idFromName(initiator.id).toString();
     let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
+    // Stamp this call chain like an executeCode execution: if the gadget's subscribeAgent
+    // calls the stub back synchronously, deliverAgentCallback sees the self-delivery and
+    // answers immediately instead of deadlocking the turn (see AgentSelfLoopbackProps).
+    let watchExecution = new Uint8Array(16);
+    crypto.getRandomValues(watchExecution);
+    let executionId = watchExecution.toBase64();
+    this.#activeExecutions.set(chatId, executionId);
     if (typeof facet.subscribeAgent !== "function") {
       throw new Error(
           `Gadget "${bindingName}" does not expose subscribeAgent(callback). Give its server.js ` +
           `a subscribeAgent(cb) method that stores the callback (ctx.storage.put) and calls it ` +
           `on every user-driven state change, then retry.`);
     }
-    await facet.subscribeAgent(await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId));
+    let selfStub = await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId, executionId);
+    try {
+      await this.#guardedGadgetCall(facet, "subscribeAgent", 10_000,
+          () => facet.subscribeAgent(selfStub));
+    } finally {
+      if (this.#activeExecutions.get(chatId) === executionId) {
+        this.#activeExecutions.delete(chatId);
+      }
+    }
     this.storage.gadgetWatches.put({
       chatId, gadgetId, bindingName, lastActivityAt: Date.now(), initiator,
     });
@@ -7414,7 +7463,10 @@ class OverseerImpl implements AgentHooks {
     this.storage.gadgetWatches.delete(`${keyString(chatId)}.${keyString(gadgetId)}`);
     try {
       let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
-      if (typeof facet.unsubscribeAgent === "function") await facet.unsubscribeAgent();
+      if (typeof facet.unsubscribeAgent === "function") {
+        await this.#guardedGadgetCall(facet, "unsubscribeAgent", 10_000,
+            () => facet.unsubscribeAgent());
+      }
     } catch (err) {
       // The gadget may be gone or not expose unsubscribe; the watch row is gone either way.
       this.logger.warn("gadget watch unsubscribe best-effort failed", {
@@ -7478,7 +7530,10 @@ class OverseerImpl implements AgentHooks {
           });
           try {
             let facet = await this.getGadgetFacet(watch.gadgetId, chatId) as unknown as NativeRpcStub<any>;
-            if (typeof facet.unsubscribeAgent === "function") await facet.unsubscribeAgent();
+            if (typeof facet.unsubscribeAgent === "function") {
+              await this.#guardedGadgetCall(facet, "unsubscribeAgent", 10_000,
+                  () => facet.unsubscribeAgent());
+            }
           } catch { /* best-effort */ }
           if (watch.initiator) {
             this.addChatMessages(chatId, watch.initiator, [{
@@ -7493,8 +7548,9 @@ class OverseerImpl implements AgentHooks {
         let facet =
             await this.getGadgetFacet(watch.gadgetId, chatId) as unknown as NativeRpcStub<any>;
         if (typeof facet.subscribeAgent === "function") {
-          await facet.subscribeAgent(
-              await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId));
+          let stub = await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId);
+          await this.#guardedGadgetCall(facet, "subscribeAgent", 10_000,
+              () => facet.subscribeAgent(stub));
         }
       } catch (err) {
         this.logger.warn("gadget watch re-assert failed", {
@@ -7506,7 +7562,8 @@ class OverseerImpl implements AgentHooks {
 
   async deliverAgentCallback(
       chatId: number, methodName: string, args: unknown[],
-      initiatorUserId: string, initiatorModelId: string): Promise<unknown> {
+      initiatorUserId: string, initiatorModelId: string,
+      executionId?: string): Promise<unknown> {
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
 
     // Compute the summary eagerly (it only reads, doesn't mutate or need the sequence).
@@ -7526,6 +7583,18 @@ class OverseerImpl implements AgentHooks {
       liveChat.pendingAgentCallbacks.push(
           { methodName, args, argsSummary, initiatorUserId, initiatorModelId, resolve, reject });
     });
+
+    // Self-delivery: the callback was invoked from inside the agent turn that is running
+    // right now (the classic case is a gadget's subscribeAgent() calling the stored stub
+    // with the initial state while the turn's own watchGadget/executeCode awaits that
+    // subscribe). Waiting for the agent to resolve it is a structural deadlock -- the turn
+    // cannot run to the resolution while it is blocked on the call that delivered it. Such
+    // callbacks are notifications; answer immediately and let the queued copy be handled by
+    // the next turn, exactly like any other callback that lands mid-turn.
+    if (executionId !== undefined && meta.activeAgent &&
+        this.#turnExecutionId(chatId) === executionId) {
+      promise = Promise.resolve(undefined);
+    }
 
     // If there's no active agent right now, go ahead and start one.
     //
@@ -8849,6 +8918,7 @@ class OverseerImpl implements AgentHooks {
       this.#codeModeResolvers.set(executionId, resolve);
     });
 
+    this.#activeExecutions.set(chatId, executionId);
     try {
       let tailProps = {
         executionId,
@@ -8960,6 +9030,9 @@ class OverseerImpl implements AgentHooks {
 
       return log;
     } finally {
+      if (this.#activeExecutions.get(chatId) === executionId) {
+        this.#activeExecutions.delete(chatId);
+      }
       // Guarded by executionId so this cleanup can never clobber a newer registration.
       if (this.#activeWorktreeTurns.get(chatId)?.executionId === executionId) {
         this.#activeWorktreeTurns.delete(chatId);
@@ -10960,6 +11033,11 @@ type AgentSelfLoopbackProps = {
   chatId: number;
   initiatorUserId: string;
   initiatorModelId: string;
+  /** The executeCode/watchGadget execution that minted this stub, for self-delivery
+   *  detection: a callback that re-enters its own running turn would deadlock (the turn
+   *  awaits the gadget, the gadget awaits the callback's resolution, the callback waits
+   *  for this very turn), so deliverAgentCallback answers those immediately. */
+  executionId?: string;
 };
 
 /**
@@ -10996,7 +11074,8 @@ export class AgentSelfLoopback
         }
         return (...args: unknown[]) => {
           return stub.deliverAgentCallback(
-              chatId, String(prop), args, initiatorUserId, initiatorModelId);
+              chatId, String(prop), args, initiatorUserId, initiatorModelId,
+              ctx.props.executionId);
         };
       },
       getPrototypeOf(target) {
