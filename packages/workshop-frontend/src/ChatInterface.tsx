@@ -2643,6 +2643,21 @@ function ChatInterface({
     }
     await refreshGadgetWatches();
   }, [overseer, selectedChatId, refreshGadgetWatches]);
+
+  // The chat subscriber instance is created once (useRef) and closes over first-render
+  // functions, so the event-driven strip refresh goes through refs: every chat event
+  // (an agent turn establishing or removing a watch among them) schedules a debounced
+  // refresh with the CURRENT closure.
+  const refreshWatchesRef = useRef(refreshGadgetWatches);
+  useEffect(() => { refreshWatchesRef.current = refreshGadgetWatches; });
+  const watchesRefreshTimer = useRef<number | null>(null);
+  const scheduleWatchesRefresh = () => {
+    if (watchesRefreshTimer.current !== null) return;
+    watchesRefreshTimer.current = window.setTimeout(() => {
+      watchesRefreshTimer.current = null;
+      void refreshWatchesRef.current();
+    }, 2500);
+  };
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -3706,6 +3721,7 @@ function ChatInterface({
       }
 
       scheduleUpdate();
+      scheduleWatchesRefresh();
     }
   }
 

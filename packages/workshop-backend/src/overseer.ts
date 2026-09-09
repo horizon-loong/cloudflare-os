@@ -1396,6 +1396,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         gadgetId: WorkpieceId,
         bindingName: string,
         lastActivityAt: number,
+        initiator?: AiChatAuthorInfo,
       }>()({
         primaryKey(entry) {
           return `${keyString(entry.chatId)}.${keyString(entry.gadgetId)}`;
@@ -7399,7 +7400,9 @@ class OverseerImpl implements AgentHooks {
           `on every user-driven state change, then retry.`);
     }
     await facet.subscribeAgent(await this.#mintWatchStub(chatId, initiatorUserId, initiatorModelId));
-    this.storage.gadgetWatches.put({chatId, gadgetId, bindingName, lastActivityAt: Date.now()});
+    this.storage.gadgetWatches.put({
+      chatId, gadgetId, bindingName, lastActivityAt: Date.now(), initiator,
+    });
     this.logger.info("gadget watch registered", {
       event: "gadget.watch.registered", chatId, gadgetId,
     });
@@ -7434,6 +7437,17 @@ class OverseerImpl implements AgentHooks {
         .find(w => w.gadgetId === gadgetId);
     if (!watch) return;
     await this.unwatchGadget(chatId, gadgetId, watch.bindingName);
+    // The stop came from the user's UI, not from the agent, so the agent has no idea its
+    // wake-up channel is gone. Record the fact in the chat log: the next turn (and every
+    // replay) sees it, so "let's keep playing" resolves to watchGadget instead of silence.
+    if (watch.initiator) {
+      this.addChatMessages(chatId, watch.initiator, [{
+        type: "agentNudge",
+        text: `Realtime following of "${watch.bindingName}" was stopped by the user. You are ` +
+            `no longer woken by this Gadget's changes. If the user asks to resume the ` +
+            `interactive session, call watchGadget again.`,
+      }]);
+    }
   }
 
   /** Renewed on any delivered callback and at every turn end; expiry unwatch happens here. */
@@ -7462,6 +7476,18 @@ class OverseerImpl implements AgentHooks {
           this.logger.info("gadget watch expired idle", {
             event: "gadget.watch.expired", chatId, gadgetId: watch.gadgetId,
           });
+          try {
+            let facet = await this.getGadgetFacet(watch.gadgetId, chatId) as unknown as NativeRpcStub<any>;
+            if (typeof facet.unsubscribeAgent === "function") await facet.unsubscribeAgent();
+          } catch { /* best-effort */ }
+          if (watch.initiator) {
+            this.addChatMessages(chatId, watch.initiator, [{
+              type: "agentNudge",
+              text: `Realtime following of "${watch.bindingName}" stopped automatically ` +
+                  `after 30 minutes of inactivity. Call watchGadget again if the user wants ` +
+                  `to resume the interactive session.`,
+            }]);
+          }
           continue;
         }
         let facet =
