@@ -3332,7 +3332,7 @@ export async function runAgent(
         // awaits this before starting the next request, so the log can never fall behind what
         // the model has seen.
         let message = event.message as AssistantMessage;
-        console.error(`[celld-dbg] turn_end stopReason=${message.stopReason} blocks=[${
+        (globalThis as any).__celldRpcDebug === true && console.error(`[celld-dbg] turn_end stopReason=${message.stopReason} blocks=[${
           message.content.map(b => b.type).join(",")}] textLen=${
           message.content.filter(b => b.type === "text").map(b => b.text).join("").length}`);
         if (message.stopReason === "error" || message.stopReason === "aborted") {

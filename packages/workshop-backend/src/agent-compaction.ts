@@ -40,7 +40,7 @@ export function getModelTokenLimits(config: AiModelConfig):
       // provider API's own default: omitting max_tokens lets e.g. DeepSeek's
       // 4096 default truncate long reasoning turns mid-tool-call.
       8192;
-  console.error(`[celld-dbg] getModelTokenLimits: provider=${config.provider} ` +
+  (globalThis as any).__celldRpcDebug === true && console.error(`[celld-dbg] getModelTokenLimits: provider=${config.provider} ` +
       `model=${config.model} maxOut=${maxOutputTokens}`);
   return {
     inputBudget: (model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) - (maxOutputTokens ?? 0),

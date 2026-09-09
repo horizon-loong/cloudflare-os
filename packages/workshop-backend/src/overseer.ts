@@ -72,6 +72,12 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
+// celld-port diagnostics: gated by the same CELLD_RPC_DEBUG flag the celld
+// host injects as globalThis.__celldRpcDebug before the harness loads (off
+// by default; these are per-RPC hot-path probes from stub-protocol work).
+const RPC_DEBUG = (globalThis as any).__celldRpcDebug === true;
+const rpcDebugLog = (...args: unknown[]) => { if (RPC_DEBUG) console.error(...args); };
+
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore } from "cloudflare:workers";
 import agent from "agent.js";
@@ -1962,7 +1968,7 @@ class OverseerImpl implements AgentHooks {
   // it'll recognize that agents are running and wait for them.
   #resumeInterruptedAgents(): void {
     const records = Array.from(this.storage.activeAgents.list());
-    console.error(`[celld-dbg] resumeInterruptedAgents: ${records.length} records: ${
+    rpcDebugLog(`[celld-dbg] resumeInterruptedAgents: ${records.length} records: ${
       records.map(r => `#${r.chatId}`).join(",")}`);
     for (let record of records) {
       // Register the running agent immediately (see above), and create the LiveChatContext
@@ -4896,7 +4902,7 @@ class OverseerImpl implements AgentHooks {
   // proposed changes. (The caller is presumed to have verified the chat exists and has proposed
   // changes.)
   loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number): WorkerStub {
-    console.error(`[celld-dbg] loadGadgetWorker gadgetId=${gadgetId} chatId=${chatId} LOADER=${typeof this.env.LOADER}`);
+    rpcDebugLog(`[celld-dbg] loadGadgetWorker gadgetId=${gadgetId} chatId=${chatId} LOADER=${typeof this.env.LOADER}`);
     let codeVersion = `${this.storage.codeVersion.get()}`;
     let sequence: number | undefined;
     // Snapshotted in the same synchronous step as the cache key's sequence: the loader callback
@@ -5089,7 +5095,7 @@ class OverseerImpl implements AgentHooks {
         return (...args: any[]) => {
           let result: Promise<any> = Reflect.apply(method, target, args);
           return result.catch((err: any) => {
-            console.error(`[celld-dbg] gadget facet RPC ${String(prop)} failed:`, err, err?.stack ?? '');
+            rpcDebugLog(`[celld-dbg] gadget facet RPC ${String(prop)} failed:`, err, err?.stack ?? '');
             let msg = err;
             if (err instanceof Error) {
               // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
@@ -7026,7 +7032,7 @@ class OverseerImpl implements AgentHooks {
     // durable; registering it with waitUntil is what makes that true on runtimes where a
     // floating promise is dropped the moment its triggering client disconnects.
     this.ctx.waitUntil(turn);
-    console.error(`[celld-dbg] startAgent: turn registered with waitUntil chat=${chatId}`);
+    rpcDebugLog(`[celld-dbg] startAgent: turn registered with waitUntil chat=${chatId}`);
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -7265,7 +7271,7 @@ class OverseerImpl implements AgentHooks {
       liveChat.activeAgentCallbacks.clear();
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
-      console.error(`[celld-dbg] runAgentTurn finally: chat=${chatId} ` +
+      rpcDebugLog(`[celld-dbg] runAgentTurn finally: chat=${chatId} ` +
         `pendingCallbacks=${liveChat.pendingAgentCallbacks.length}`);
       if (liveChat.pendingAgentCallbacks.length > 0) {
         // waitUntil, not fire-and-forget: this turn's promise settles the moment this finally
@@ -7383,7 +7389,7 @@ class OverseerImpl implements AgentHooks {
       if (!meta) throw new Error("Chat thread was deleted before callback was handled.");
 
       let chatId = meta.id;
-      console.error(`[celld-dbg] startAgentForCallbacks: enter chat=${chatId} ` +
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: enter chat=${chatId} ` +
         `callbacks=${callbacks.length}`);
 
       // Resolve the AI model based on the initiator of the first message. This means this
@@ -7392,18 +7398,18 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromString(callbacks[0].initiatorUserId));
 
       let userMeta = await user.getChatContext(callbacks[0].initiatorModelId);
-      console.error(`[celld-dbg] startAgentForCallbacks: gotChatContext chat=${chatId} ` +
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: gotChatContext chat=${chatId} ` +
         `model=${userMeta.aiModel?.profile.id ?? "none"}`);
 
       if (!userMeta.aiModel) {
         throw new Error("No AI model configured for agent callback processing.");
       }
 
-      console.error(`[celld-dbg] startAgentForCallbacks: before prep-wait chat=${chatId}`);
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: before prep-wait chat=${chatId}`);
       // getChatContext() waits on the user's Durable Object. A user message may start an agent while
       // that call is pending, so wait for message preparation to finish and then re-read chat state.
       let preparation = this.waitForChatMessagePreparation(chatId);
-      console.error(`[celld-dbg] startAgentForCallbacks: prep=${preparation ? "WAITING" : "none"} chat=${chatId}`);
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: prep=${preparation ? "WAITING" : "none"} chat=${chatId}`);
       while (preparation) {
         await preparation;
         preparation = this.waitForChatMessagePreparation(chatId);
@@ -7411,7 +7417,7 @@ class OverseerImpl implements AgentHooks {
       meta = this.storage.chatMeta.get(chatId);
       if (!meta) throw new Error("Chat thread was deleted before callback was handled.");
       if (meta.activeAgent) {
-        console.error(`[celld-dbg] startAgentForCallbacks: activeAgent still set, ` +
+        rpcDebugLog(`[celld-dbg] startAgentForCallbacks: activeAgent still set, ` +
           `chat=${chatId} — deferring`);
         return;
       }
@@ -7473,13 +7479,13 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
-      console.error(`[celld-dbg] startAgentForCallbacks: calling startAgent chat=${chatId}`);
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: calling startAgent chat=${chatId}`);
       this.startAgent(chatId, userMeta.aiModel, author, callbacks[0].initiatorUserId,
                       /* callbackInitiated */ true);
-      console.error(`[celld-dbg] startAgentForCallbacks: startAgent returned chat=${chatId}`);
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks: startAgent returned chat=${chatId}`);
     } catch (err) {
       // Failure to set up the agent. Make sure to reject all callbacks.
-      console.error(`[celld-dbg] startAgentForCallbacks FAILED: ${err}`);
+      rpcDebugLog(`[celld-dbg] startAgentForCallbacks FAILED: ${err}`);
       liveChat.pendingAgentCallbacks = [];
       for (let cb of callbacks) {
         cb.reject(err);
@@ -7605,7 +7611,7 @@ class OverseerImpl implements AgentHooks {
     // Worktrees never seed chats: they are chat-private and carry no bindingName at all.
     let gadgets = [...this.storage.gadgets.list()]
         .filter((gadget): gadget is GadgetRecord => gadget.type === "gadget" && !gadget.pending);
-    console.error(`[celld-dbg] defaultBindingList gadgets: ${
+    rpcDebugLog(`[celld-dbg] defaultBindingList gadgets: ${
       gadgets.map(g => `#${g.id} name=${g.bindingName} keys=${Object.keys(g).join("|")}`).join(", ")}`);
     for (let gadget of gadgets) {
       if (!(gadget.bindingName in result)) result[gadget.bindingName] = gadget.id;
@@ -8706,9 +8712,9 @@ class OverseerImpl implements AgentHooks {
       let entrypoint = this.env.LOADER.load(workerDef).getEntrypoint<CodeModeEntrypoint>();
 
       // First check the code actually starts up. Treat startup errors as total failures.
-      console.error(`[celld-dbg] executeCodeMode before verify`);
+      rpcDebugLog(`[celld-dbg] executeCodeMode before verify`);
       await entrypoint.verify();
-      console.error(`[celld-dbg] executeCodeMode after verify`);
+      rpcDebugLog(`[celld-dbg] executeCodeMode after verify`);
 
       // Create the `self` magic object that allows executed code to call back into this
       // chat thread. Uses the initiator's user ID for model resolution on callbacks.
@@ -8744,10 +8750,10 @@ class OverseerImpl implements AgentHooks {
       try {
         // The forger is a transient stub argument, so the capability to forge persistent
         // gadget-restore stubs lives exactly as long as this run() call.
-        console.error(`[celld-dbg] executeCodeMode before run`);
+        rpcDebugLog(`[celld-dbg] executeCodeMode before run`);
         capturedLog = (await entrypoint.run(selfStub, callbackResolvers,
             new RestoreForgerImpl(this, chatId, bindings))) ?? "";
-        console.error(`[celld-dbg] executeCodeMode after run`);
+        rpcDebugLog(`[celld-dbg] executeCodeMode after run`);
       } catch (err) {
         if (err instanceof Error && err.stack) {
           error = err.stack;
@@ -11913,7 +11919,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listChats(): Promise<AiChatMetadata[]> {
     const chats = [...this.impl.storage.chatMeta.list({reverse: true})];
-    console.error(`[celld-dbg] listChats: ${
+    rpcDebugLog(`[celld-dbg] listChats: ${
       chats.map(c => `#${c.id} active=${!!c.activeAgent}`).join(", ")}`);
     return chats.map(meta => this.impl.chatMetaForClient(meta));
   }
