@@ -1407,6 +1407,16 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      // Gadgets observed sending at least one tagged notification (see
+      // deliverGadgetNotification). A gadget that has never tagged is treated as
+      // legacy: its notifications carry no event information, so an events
+      // filter on a watch of it is inert rather than a silent dead subscription.
+      gadgetEventTaggers: collection<{ gadgetId: WorkpieceId }>()({
+        primaryKey(entry) {
+          return keyString(entry.gadgetId);
+        }
+      }),
+
       // Model-facing snapshots of agent steps, replayed verbatim on later turns so reasoning
       // (including provider-opaque signatures) and true model provenance survive turn boundaries
       // and restarts. Stored separately from the chat messages so these payloads -- opaque and
@@ -7620,15 +7630,24 @@ export class WatchableGadget extends DurableObject {
    *  `event` is the optional tag the gadget attached to this notification
    *  (notifyAgents(state, {event})). Per-watch filtering: an unfiltered watch receives
    *  everything; a watch with an events filter receives only notifications tagged with
-   *  one of its events -- an untagged notification carries no event information, so
-   *  filtered watches skip it rather than guess. */
+   *  one of its events. Filters bind only once a gadget has actually tagged a
+   *  notification -- until then the gadget is legacy and every notification is
+   *  delivered, so adding a filter to an untagged gadget's watch cannot go silent. */
   async deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown,
                                   event?: string): Promise<number> {
+    // Record that this gadget tags its notifications. Until it has tagged at least
+    // once, it is treated as legacy and events filters on its watches stay inert
+    // (see the filter below) -- otherwise a filter added to a watch of an untagged
+    // gadget would silently kill every wake.
+    if (event !== undefined) {
+      this.storage.gadgetEventTaggers.put({gadgetId});
+    }
+    let usesTags = this.storage.gadgetEventTaggers.get(keyString(gadgetId)) !== undefined;
     let delivered = 0;
     for (let watch of this.storage.gadgetWatches.list({})) {
       if (watch.gadgetId !== gadgetId) continue;
       if (!watch.initiator || !watch.initiatorModelId) continue;
-      if (watch.events !== undefined && watch.events.length > 0 &&
+      if (usesTags && watch.events !== undefined && watch.events.length > 0 &&
           (event === undefined || !watch.events.includes(event))) {
         continue;
       }
