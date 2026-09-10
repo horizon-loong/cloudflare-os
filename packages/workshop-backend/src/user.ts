@@ -713,10 +713,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
-    if (gwConfig) {
-      // In AI Gateway mode, always use the hardcoded quick model.
-      result.quickModel = gwConfig.getQuickModelConfig();
-    } else {
+    // Gateway mode has no quick model anymore (the old hardcoded Workers AI model went
+    // out with the Workers AI provider), so gateway deployments skip auto-titles.
+    {
       let quickModelId = this.storage.quickModel.get();
       if (quickModelId) {
         let quickModel = this.storage.aiModels.get(quickModelId);

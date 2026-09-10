@@ -20,8 +20,8 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
   google: 'Google',
-  cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',
+  deepseek: 'DeepSeek',
 }
 
 // Placeholder hinting at the shape of each provider's API token.
@@ -29,8 +29,8 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   anthropic: 'sk-ant-...',
   openai: 'sk-...',
   google: 'AIza...',
-  cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
+  deepseek: 'sk-...',
 }
 
 // Example used in the custom-model placeholders for providers that have no suggested models
@@ -100,7 +100,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [modelId, setModelId] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [apiToken, setApiToken] = useState('')
-  const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
 
   // Validation errors
@@ -122,7 +121,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setModelId('')
       setDisplayName('')
       setApiToken('')
-      setAccountId('')
       setApiUrl('')
       setErrors({})
       setAdvancedOpen(false)
@@ -143,7 +141,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setDisplayName(sel.displayName)
     }
     setApiToken('')
-    setAccountId('')
     setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
   }
 
@@ -160,15 +157,10 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
 
     const isOllama = selection?.provider === 'ollama'
-    const isCloudflare = selection?.provider === 'cloudflare'
     const showCredentials = !gatewayMode
 
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
-    }
-
-    if (showCredentials && isCloudflare && !accountId.trim()) {
-      newErrors.accountId = 'Please enter your Cloudflare account ID'
     }
 
     if (showCredentials && isOllama && !apiUrl.trim()) {
@@ -198,7 +190,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         provider: selection!.provider,
         model: finalModelId,
         apiToken: gatewayMode ? '' : apiToken.trim(),
-        ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
         ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
       }
 
@@ -217,7 +208,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const showCustomFields = selection?.type === 'custom'
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
-  const isCloudflare = selection?.provider === 'cloudflare'
   const showCredentials = !gatewayMode
 
   // Group options by provider for rendering with visual separators.
@@ -294,19 +284,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             </>
           )}
 
-          {/* Cloudflare account ID (the Workers AI REST endpoint is account-scoped) */}
-          {showCredentials && isCloudflare && (
-            <Input
-              label="Cloudflare Account ID"
-              placeholder="e.g., 0123456789abcdef0123456789abcdef"
-              description="The Cloudflare account to bill for Workers AI usage"
-              value={accountId}
-              onChange={(e) => { setAccountId(e.target.value); setErrors(prev => ({ ...prev, accountId: '' })) }}
-              error={errors.accountId}
-              variant={errors.accountId ? 'error' : 'default'}
-            />
-          )}
-
           {/* API Token */}
           {showCredentials && selection && (
             <SensitiveInput
@@ -315,8 +292,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               description={
                 isOllama
                   ? 'Optional for local Ollama access'
-                  : isCloudflare
-                  ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
                   : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
               }
               value={apiToken}
@@ -339,8 +314,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             />
           )}
 
-          {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
-          {showCredentials && selection && !isOllama && !isCloudflare && (
+          {/* Advanced Settings for non-Ollama providers */}
+          {showCredentials && selection && !isOllama && (
             <Collapsible.Root
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}

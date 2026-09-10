@@ -1,4 +1,4 @@
-import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
+import {SUGGESTED_MODELS, type AiChatMessage, type AiModelConfig}
   from "@gadgets/workshop-shared/api";
 import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
@@ -22,8 +22,7 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 /**
  * How the turn divides the model's window. The reserved response capacity is both withheld from the
- * prompt's budget and sent as the request's response cap. A Cloudflare model configured by hand has
- * no SUGGESTED_MODELS entry to declare its reservation, so the provider's applies.
+ * prompt's budget and sent as the request's response cap.
  */
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
@@ -34,7 +33,6 @@ export function getModelTokenLimits(config: AiModelConfig):
   let model = SUGGESTED_MODELS[config.provider]?.[config.model] ??
       Object.values(SUGGESTED_MODELS).map(table => table[config.model]).find(m => m !== undefined);
   let maxOutputTokens = model?.outputLimit ??
-      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
       // Unlisted models (e.g. third-party gateways surfacing a model under
       // another provider name) get a conservative default instead of the
       // provider API's own default: omitting max_tokens lets e.g. DeepSeek's

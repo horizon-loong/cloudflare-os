@@ -880,6 +880,23 @@ export default {
           { abortSignal: abortController.signal });
     }
 
+    // celld-port: SPA fallback for clients whose navigations carry no
+    // Sec-Fetch-Mode (embedded webviews, some proxies). The asset layer only
+    // applies not_found_handling to navigation-flavored requests, so deep
+    // links from such clients fall through to here instead of reaching the
+    // index.html fallback. Route-shaped paths (no file extension) get the SPA
+    // shell; everything else stays a plain 404.
+    if (req.method === "GET" && !/\.[a-zA-Z0-9]+$/.test(url.pathname)) {
+      // The Assets binding is configured in wrangler's `assets` block but the
+      // generated Env type only declares it when wrangler types runs with the
+      // assets config, which the celld deploy path does not.
+      let assets = (env as unknown as { ASSETS: { fetch(req: Request): Promise<Response> } }).ASSETS;
+      // "/" not "/index.html": html_handling auto-trailing-slash 307s the
+      // explicit index path back to the root.
+      let shell = await assets.fetch(new Request(new URL("/", url.origin).href));
+      if (shell.status === 200) return shell;
+    }
+
     return new Response("Not Found", {status: 404});
   }
 } satisfies ExportedHandler<Env>;

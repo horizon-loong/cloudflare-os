@@ -1,3 +1,4 @@
+import { randomUUID } from "./uuid";
 import type {
   AiChatAuthorInfo, ChatCodeBase, ChatGadgetPin, CodeChangeSubmission, WorkpieceId,
 } from '@gadgets/workshop-shared/api'
@@ -178,7 +179,7 @@ export class ChatOtClient {
   #display: CodeContent = new Map()
 
   // ---- stream bookkeeping ----
-  #clientId = crypto.randomUUID()
+  #clientId = randomUUID()
   #seq = 0
   #latestDurable: ChatDurableCode = { rowsThrough: 0 }
   // Rows not yet applied: held when they run ahead of the state we can apply them to (a future
@@ -675,7 +676,7 @@ export class ChatOtClient {
     this.#localSeeds.clear()
     this.#pendingSwitch = null
     this.#watermarkGapSince = null
-    this.#clientId = crypto.randomUUID()
+    this.#clientId = randomUUID()
     this.#seq = 0
     this.#ready = true
     this.#recomputeDisplay()

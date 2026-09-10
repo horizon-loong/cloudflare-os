@@ -9,14 +9,13 @@ import { stream as googleGenerativeAiStream } from "@earendil-works/pi-ai/api/go
 import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
-import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { DEEPSEEK_MODELS } from "@earendil-works/pi-ai/providers/deepseek.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
+import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS }
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
@@ -133,7 +132,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "anthropic": return (ANTHROPIC_MODELS as Record<string, Model<Api>>)[modelId];
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
-    case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
+    case "deepseek": return (DEEPSEEK_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
     default: return undefined;
   }
@@ -155,23 +154,10 @@ function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined
   return {
     contextWindow: suggested?.contextWindow ?? native?.contextWindow ?? 128_000,
     maxTokens: suggested?.outputLimit ??
-        (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
         native?.maxTokens ??
         // Truly unknown models get a conservative default instead of pi's 4096, which lets
         // providers like DeepSeek truncate long reasoning turns mid-tool-call.
         8192,
-  };
-}
-
-// Compat flags for a Workers AI model reached over its OpenAI-compatible endpoint (direct REST
-// or the gateway's workers-ai route). Matches pi's own generated Workers AI catalog entries.
-function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsCompat {
-  return {
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    supportsLongCacheRetention: false,
-    ...(catalog?.compat as OpenAICompletionsCompat | undefined),
-    sendSessionAffinityHeaders: true,
   };
 }
 
@@ -237,22 +223,6 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         cost: catalog?.cost ?? ZERO_COST,
         ...window,
         thinkingLevelMap: catalog?.thinkingLevelMap,
-      };
-    case "cloudflare":
-      // Workers AI's own OpenAI-compatible endpoint, exposed through the gateway's workers-ai
-      // route. This is Workers AI's native chat API (the same surface as its direct
-      // /accounts/{id}/ai/v1 REST endpoint), not the gateway's cross-provider /compat layer.
-      return {
-        id: config.model,
-        name: catalog?.name ?? config.model,
-        api: "openai-completions",
-        provider: "cloudflare-workers-ai",
-        baseUrl: `${gatewayUrl}/workers-ai/v1`,
-        reasoning: catalog?.reasoning ?? false,
-        input: catalog?.input ?? ["text"],
-        cost: catalog?.cost ?? ZERO_COST,
-        ...window,
-        compat: workersAiCompat(catalog),
       };
     default:
       return undefined;
@@ -539,32 +509,6 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         apiKey: config.apiToken,
         sessionAffinity,
       });
-    case "cloudflare": {
-      // Workers AI is fetch-only (no Workers-binding transport), so outside AI Gateway mode it's
-      // BYOK like every other provider: the user's own account ID and API token come from the
-      // model config. (The REST endpoint is account-scoped, hence the extra accountId field.)
-      if (!config.accountId || !config.apiToken) {
-        throw new Error(
-            "This Workers AI model has no Cloudflare credentials. Re-add it with your " +
-            "Cloudflare account ID and an API token that permits Workers AI.");
-      }
-      return makeHandle({
-        model: {
-          id: config.model,
-          name: catalog?.name ?? config.model,
-          api: "openai-completions",
-          provider: "cloudflare-workers-ai",
-          baseUrl: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/ai/v1`,
-          reasoning: catalog?.reasoning ?? false,
-          input: catalog?.input ?? ["text"],
-          cost: catalog?.cost ?? ZERO_COST,
-          ...window,
-          compat: workersAiCompat(catalog),
-        },
-        apiKey: config.apiToken,
-        sessionAffinity,
-      });
-    }
     case "google":
       return makeHandle({
         model: {
@@ -632,6 +576,36 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
             : { apiKey: config.apiToken }),
         sessionAffinity,
       });
+    case "deepseek": {
+      // pi's generated deepseek catalog entry carries everything specific to the official
+      // DeepSeek API: the OpenAI-compatible chat surface, the deepseek thinking format, and
+      // token-window metadata. Build from it so BYOK talks to https://api.deepseek.com directly
+      // (config.apiUrl overrides for proxies or compatible endpoints). DeepSeek launches and
+      // retires model ids faster than pi publishes releases (deepseek-v4-flash was retired the
+      // day V4.1 shipped, before any pi release carried it), so an id missing from the catalog
+      // falls back to the family protocol -- every catalog entry shares one API surface --
+      // instead of breaking until the next pi upgrade.
+      const native = (DEEPSEEK_MODELS as Record<string, Model<Api>>)[config.model];
+      const family = (Object.values(DEEPSEEK_MODELS)[0] ?? undefined) as Model<Api> | undefined;
+      const template = native ?? family;
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api: "openai-completions",
+          provider: "deepseek",
+          baseUrl: config.apiUrl ?? template?.baseUrl ?? "https://api.deepseek.com",
+          reasoning: template?.reasoning ?? true,
+          input: native?.input ?? ["text"],
+          cost: native?.cost ?? ZERO_COST,
+          ...window,
+          thinkingLevelMap: template?.thinkingLevelMap,
+          compat: template?.compat,
+        },
+        apiKey: config.apiToken,
+        sessionAffinity,
+      });
+    }
     case "openai":
       return makeHandle({
         model: {

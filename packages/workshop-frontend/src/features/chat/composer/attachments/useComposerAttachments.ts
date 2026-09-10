@@ -1,3 +1,4 @@
+import { randomUUID } from "../../../../uuid";
 import { useEffect, useRef, useState } from "react";
 import type { RpcStub } from "capnweb";
 import type { ChatAttachmentHandle, Overseer } from "@gadgets/workshop-shared/api";
@@ -145,7 +146,7 @@ export const useComposerAttachments = ({
         continue;
       }
 
-      const id = crypto.randomUUID();
+      const id = randomUUID();
       const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(blob) : undefined;
       const attachment: ComposerAttachment = {
         id,
