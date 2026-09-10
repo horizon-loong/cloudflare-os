@@ -1845,6 +1845,15 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
+    // A live watch row needs the heartbeat alarm even with no agents running and no
+    // response deliveries pending: this recompute is the last alarm writer at the end
+    // of every agent turn, and an unconditional deleteAlarm() here silently disarmed
+    // the watch heartbeat (one alarm per DO) -- the realtime badge then outlived the
+    // subscription it described.
+    if ([...this.storage.gadgetWatches.list({ limit: 1 })].length > 0) {
+      this.ctx.storage.setAlarm(Date.now() + this.#WATCH_HEARTBEAT_MS);
+      return;
+    }
     this.ctx.storage.deleteAlarm();
   }
 
@@ -3460,6 +3469,13 @@ class OverseerImpl implements AgentHooks {
     for (let [name, edge] of this.visibleBindings(gadget, forChatId)) {
       env[name] = this.makeBindingLoopback({type: "gatekeeper", id: edge.target}, caller);
     }
+    // Platform channel for gadget-kit.js: WatchableGadget.notifyAgents() routes state
+    // changes here rather than storing an agent stub in the gadget -- a persisted stub
+    // revives in the gadget's isolate, which has no route back to the overseer. The
+    // env is rebuilt on every facet load, so the channel cannot go stale. Assigned
+    // after user bindings so a same-named user binding cannot shadow it.
+    env.WORKSHOP = this.ctx.exports.WorkshopKitLoopback(
+        {props: {overseerId: this.ctx.id.toString(), gadgetId}});
     return env;
   }
 
@@ -4922,51 +4938,25 @@ class OverseerImpl implements AgentHooks {
   static readonly GADGET_KIT_MODULE = `
 // Platform-provided realtime watch machinery (injected by the Workshop loader).
 // Gadgets extend WatchableGadget and call this.notifyAgents(state) after each
-// user-driven state change. Registration, persistence, isolate-eviction recovery,
-// and cleanup are handled here and by the platform's watch upkeep -- never
-// implement subscribeAgent yourself.
+// user-driven state change. The subscription lives in the platform's watch table
+// and delivery is the platform's job -- never implement subscribeAgent yourself,
+// and never store an agent callback in this gadget: a stored stub does not survive
+// a facet restart, because it would revive inside this isolate, which has no route
+// back to the overseer.
 import { DurableObject } from "cloudflare:workers";
 
-const AGENT_SUB_KEY = "__agentSub";
-
 export class WatchableGadget extends DurableObject {
-  #agents = new Set();
-  #loaded = false;
+  // Handshake for the platform's watch upkeep (the watchGadget agent tool and the
+  // periodic re-assert). The callback argument is deliberately not kept.
+  async subscribeAgent(_cb) { return true; }
+  async unsubscribeAgent() { return true; }
 
-  async #ensureAgents() {
-    if (this.#loaded) return;
-    this.#loaded = true;
-    try {
-      const stored = await this.ctx.storage.get(AGENT_SUB_KEY);
-      if (stored) this.#agents.add(stored);
-    } catch (e) { /* storage unavailable: degrade to memory-only */ }
-  }
-
-  async subscribeAgent(cb) {
-    await this.#ensureAgents();
-    const d = cb.dup();
-    this.#agents.add(d);
-    try { d.onRpcBroken(() => { this.#agents.delete(d); }); } catch (e) {}
-    try { await this.ctx.storage.put(AGENT_SUB_KEY, d); } catch (e) {}
-    return true;
-  }
-
-  async unsubscribeAgent() {
-    this.#agents.clear();
-    this.#loaded = true;
-    try { await this.ctx.storage.delete(AGENT_SUB_KEY); } catch (e) {}
-    return true;
-  }
-
-  // The one verb a gadget uses: fire-and-forget notification after each
-  // user-driven state change. Deliberately does NOT await the callback -- an
-  // awaited agent callback inside a gadget method can re-enter the agent turn
-  // that called it and deadlock.
+  // The one verb a gadget uses: report a user-driven state change to every chat
+  // following this gadget. Fire-and-forget semantics -- the platform queues a
+  // callback per watching chat and wakes its agent. Do not await an agent reply
+  // here, and do not call this in a loop faster than a human could act.
   async notifyAgents(state) {
-    await this.#ensureAgents();
-    for (const cb of [...this.#agents]) {
-      try { cb.update(state).catch(() => {}); } catch (e) { this.#agents.delete(cb); }
-    }
+    return this.env.WORKSHOP.notifyAgentsWatching(state);
   }
 }
 `;
@@ -7446,6 +7436,18 @@ export class WatchableGadget extends DurableObject {
     await this.ctx.storage.setAlarm(next);
   }
 
+  /** Re-arm the watch heartbeat from the first chat subscription after a process
+   *  restart -- a page being open is precisely when watches must work. Nothing else
+   *  self-wakes the overseer for watches: the turn-end re-assert needs an agent turn,
+   *  deliveries need a live subscription, and the alarm does not survive a restart
+   *  that followed a turn-end alarm recompute. */
+  bootstrapWatchHeartbeat(): Promise<void> {
+    if ([...this.storage.gadgetWatches.list({ limit: 1 })].length === 0) {
+      return Promise.resolve();
+    }
+    return this.#scheduleWatchHeartbeat();
+  }
+
   /** Alarm entry: re-assert every watch of this workspace; renew while any remain. */
   async heartbeatGadgetWatches(): Promise<void> {
     let watches = [...this.storage.gadgetWatches.list({})];
@@ -7585,6 +7587,31 @@ export class WatchableGadget extends DurableObject {
   listGadgetWatches(chatId?: number): GadgetWatchInfo[] {
     let prefix = chatId === undefined ? "" : `${keyString(chatId)}.`;
     return [...this.storage.gadgetWatches.list(prefix ? {prefix} : {})];
+  }
+
+  /** Fan a gadget's notifyAgents() state change out to every chat watching it. The kit
+   *  routes notifications through the platform rather than storing agent stubs in the
+   *  gadget (a persisted stub revives in the gadget's isolate, which has no route back
+   *  to the overseer), so this is the delivery path for kit gadgets: the watch table is
+   *  the subscription, and delivery loopbacks are minted fresh per chat. */
+  async deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown): Promise<number> {
+    let delivered = 0;
+    for (let watch of this.storage.gadgetWatches.list({})) {
+      if (watch.gadgetId !== gadgetId) continue;
+      if (!watch.initiator || !watch.initiatorModelId) continue;
+      // Idle rows are retired by the heartbeat/turn-end upkeep; don't wake a chat
+      // whose watch is about to expire.
+      if (Date.now() - watch.lastActivityAt > this.#GADGET_WATCH_IDLE_MS) continue;
+      let initiatorUserId = this.users.idFromName(watch.initiator.id).toString();
+      // Fire-and-forget, exactly like the stub path before it: deliverAgentCallback
+      // queues the callback, wakes the agent, and returns a promise for the agent's
+      // eventual reply -- which this fan-out must not wait for.
+      this.deliverAgentCallback(
+          watch.chatId, "update", [state], initiatorUserId, watch.initiatorModelId)
+          .catch(() => { /* the agent's reply is optional; the wake is the point */ });
+      ++delivered;
+    }
+    return delivered;
   }
 
   async stopGadgetWatch(chatId: number, gadgetId: WorkpieceId): Promise<void> {
@@ -10212,6 +10239,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     await this.impl.heartbeatGadgetWatches();
   }
 
+  // Gadget-worker facing (WorkshopKitLoopback): kit gadgets' notifyAgents() fan-out.
+  // celld's cross-cell dispatch resolves methods on this DO class only.
+  deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown): Promise<number> {
+    return this.impl.deliverGadgetNotification(gadgetId, state);
+  }
+
   // celld-port: DO-level pass-throughs for the workspace chat surface. celld's
   // cross-cell dispatch resolves methods on this DO class only, so the
   // workspace page's RPCs (which capnweb addresses to the returned
@@ -10955,9 +10988,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   /** Called by AgentSelfLoopback when any method is called on the `self` object. */
   deliverAgentCallback(
       chatId: number, methodName: string, args: unknown[],
-      initiatorUserId: string, initiatorModelId: string): Promise<unknown> {
+      initiatorUserId: string, initiatorModelId: string,
+      executionId?: string): Promise<unknown> {
+    // executionId must ride through: the impl's self-delivery detection (deadlock
+    // guard for a gadget calling the agent back from inside the agent's own turn)
+    // keys on it.
     return this.impl.deliverAgentCallback(
-        chatId, methodName, args, initiatorUserId, initiatorModelId);
+        chatId, methodName, args, initiatorUserId, initiatorModelId, executionId);
   }
 
   /** Called by TransientStubLoopback to retrieve a live transient RPC stub. */
@@ -11226,6 +11263,30 @@ export class AgentSelfLoopback
    * and so the loopback binding won't be created.
    */
   dummyMethodToWorkAroundValidatorBug() {}
+}
+
+type WorkshopKitLoopbackProps = {
+  overseerId: string;
+  gadgetId: WorkpieceId;
+};
+
+/**
+ * The `WORKSHOP` binding injected into every gadget worker. gadget-kit.js's
+ * WatchableGadget.notifyAgents() calls notifyAgentsWatching() here, and the overseer
+ * fans the state change out to every chat watching this gadget. Runs in the backend
+ * worker, unlike a stub persisted inside the gadget (which revives in the gadget's
+ * isolate where the OverseerDurableObject binding -- and so the loopback's own
+ * constructor -- does not exist), so notifications survive facet restarts and isolate
+ * evictions with nothing about the subscription stored in the gadget at all.
+ */
+export class WorkshopKitLoopback
+    extends WorkerEntrypoint<Cloudflare.Env, WorkshopKitLoopbackProps> {
+  notifyAgentsWatching(state: unknown): Promise<number> {
+    let ns = this.env.OverseerDurableObject;
+    let stub: DurableObjectStub<OverseerDurableObject> =
+        ns.get(ns.idFromString(this.ctx.props.overseerId));
+    return stub.deliverGadgetNotification(this.ctx.props.gadgetId, state);
+  }
 }
 
 type TransientStubLoopbackProps = {
@@ -12530,6 +12591,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       event: "chat.subscription.replay.completed",
       size: replayCount,
     });
+
+    // A subscriber connecting is the cheapest restart-safe moment to make sure watch
+    // heartbeats are armed: an open page is exactly when "Following in real time"
+    // must hold. Fire-and-forget -- the replay above is this event's real work.
+    void this.impl.bootstrapWatchHeartbeat();
 
     chatMeta.subscribe(metaSubscriber);
     chats.subscribe(msgSubscriber);

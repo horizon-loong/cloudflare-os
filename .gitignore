@@ -47,3 +47,4 @@ wrangler.dev.jsonc
 
 # celld dev runtime state (local sqlite/replication files)
 packages/workshop-backend/.celld/
+.celld/
