@@ -919,7 +919,7 @@ class CelldWsAdapter {
   get binaryType() { return "arraybuffer"; }
   addEventListener(type: string, handler: (ev: any) => void) { this.handlers.set(type, handler); }
   removeEventListener(_type: string, _handler: (ev: any) => void) {}
-  send(message: ArrayBuffer | string) { console.error(`[celld-ws] send out: ${typeof message} ${typeof message === "string" ? message.length : message.byteLength}B`); (this.ws as any).send(message); }
+  send(message: ArrayBuffer | string) { (this.ws as any).send(message); }
   close(code?: number, reason?: string) { this.ws.close(code, reason); }
   deliverMessage(data: ArrayBuffer | string) { this.handlers.get("message")?.({ data }); }
   deliverClose(code: number, reason: string) { this.handlers.get("close")?.({ code, reason }); }
@@ -988,7 +988,6 @@ export class ApiWsDurableObject extends DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
-    console.error(`[celld-ws] msg in: ${typeof message} ${typeof message === "string" ? message.length : message.byteLength}B`);
     let session = this.sessions.get(ws);
     session?.adapter.deliverMessage(message);
     if (!session) return;
