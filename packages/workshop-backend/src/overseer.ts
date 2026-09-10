@@ -7678,6 +7678,22 @@ export class WatchableGadget extends DurableObject {
 
     // Compute the summary eagerly (it only reads, doesn't mutate or need the sequence).
     let argsSummary = summarizeArgs(args);
+    // Payload diet: a full state snapshot in the notification rides into the
+    // agent's context as PARAMS_N.args and has cost real sessions hundreds of
+    // thousands of tokens (a 500KB board array was observed). Above the cap the
+    // payload is replaced with its summary plus the getState() hint; the gadget
+    // itself keeps whatever it sent, and the model re-reads precise state on demand.
+    try {
+      if (JSON.stringify(args).length > 64 * 1024) {
+        args = [{
+          notification: methodName,
+          summary: argsSummary,
+          elided: "state snapshot exceeded 64KB and was dropped; call the gadget's " +
+              "getState() for current details",
+        }];
+        argsSummary = "(large snapshot elided)";
+      }
+    } catch { /* unserializable args ride as-is */ }
 
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) throw new Error("No such chatId: " + chatId);
@@ -7687,8 +7703,18 @@ export class WatchableGadget extends DurableObject {
     // and a chat watches few gadgets, so renewing all of them is the right grain).
     this.#touchGadgetWatches(chatId);
 
-    // Register this callback in the pending callbacks for the chat.
+    // Register this callback in the pending callbacks for the chat. A notification
+    // with the same method still pending is superseded: its state snapshot is stale
+    // by definition, so the newest replaces it (settling the old as a no-op) -- a
+    // gadget that notifies on a timer can never grow an unbounded wake queue.
     let liveChat = this.#getLiveChat(chatId);
+    let superseded = liveChat.pendingAgentCallbacks.find(
+        cb => cb.methodName === methodName && !("settled" in cb));
+    if (superseded !== undefined) {
+      superseded.resolve(undefined);
+      liveChat.pendingAgentCallbacks.splice(
+          liveChat.pendingAgentCallbacks.indexOf(superseded), 1);
+    }
     let promise = new Promise<unknown>((resolve, reject) => {
       liveChat.pendingAgentCallbacks.push(
           { methodName, args, argsSummary, initiatorUserId, initiatorModelId, resolve, reject });
