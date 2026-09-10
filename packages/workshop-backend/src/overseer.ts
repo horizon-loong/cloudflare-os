@@ -1398,6 +1398,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         lastActivityAt: number,
         initiator?: AiChatAuthorInfo,
         initiatorModelId?: string,
+        // Optional event filter (see watchGadget): when set, only notifications
+        // the gadget tagged with one of these events wake this chat.
+        events?: string[],
       }>()({
         primaryKey(entry) {
           return `${keyString(entry.chatId)}.${keyString(entry.gadgetId)}`;
@@ -4955,8 +4958,15 @@ export class WatchableGadget extends DurableObject {
   // following this gadget. Fire-and-forget semantics -- the platform queues a
   // callback per watching chat and wakes its agent. Do not await an agent reply
   // here, and do not call this in a loop faster than a human could act.
-  async notifyAgents(state) {
-    return this.env.WORKSHOP.notifyAgentsWatching(state);
+  //
+  // opts.event optionally TAGS the notification (e.g. "move", "reset", "win").
+  // Chats can subscribe with an events filter (watchGadget's events parameter)
+  // and will only be woken by tagged notifications matching their filter;
+  // untagged notifications reach only unfiltered watches.
+  async notifyAgents(state, opts) {
+    const event = opts && typeof opts === "object" && typeof opts.event === "string"
+        ? opts.event : undefined;
+    return this.env.WORKSHOP.notifyAgentsWatching(state, event);
   }
 }
 `;
@@ -7523,10 +7533,16 @@ export class WatchableGadget extends DurableObject {
   }
 
   async watchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string,
-                    initiator: AiChatAuthorInfo, initiatorModelId: string): Promise<string> {
+                    initiator: AiChatAuthorInfo, initiatorModelId: string,
+                    events?: string[]): Promise<string> {
     if (!this.storage.gadgets.get(gadgetId)) {
       throw new Error(`There is no gadget "${bindingName}" in this workspace.`);
     }
+    // Normalize the event filter: trimmed, non-empty, deduped, bounded. An
+    // empty array means "no filter" (same as omitted).
+    let eventFilter = [...new Set((events ?? []).map(e => e.trim()).filter(e => e !== ""))]
+        .filter(e => e.length <= 64).slice(0, 16);
+    if (eventFilter.length === 0) eventFilter = undefined;
     let initiatorUserId = this.users.idFromName(initiator.id).toString();
     let facet = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
     // Stamp this call chain like an executeCode execution: if the gadget's subscribeAgent
@@ -7554,14 +7570,20 @@ export class WatchableGadget extends DurableObject {
     }
     this.storage.gadgetWatches.put({
       chatId, gadgetId, bindingName, lastActivityAt: Date.now(), initiator,
-      initiatorModelId,
+      initiatorModelId, ...(eventFilter !== undefined ? {events: eventFilter} : {}),
     });
     await this.#scheduleWatchHeartbeat();
     this.logger.info("gadget watch registered", {
       event: "gadget.watch.registered", chatId, gadgetId,
+      ...(eventFilter !== undefined ? {events: eventFilter} : {}),
     });
     return `Watching "${bindingName}" in real time. Its state changes will wake this chat; ` +
-        `the platform keeps the subscription alive. Call unwatchGadget to stop following it.`;
+        `the platform keeps the subscription alive.` +
+        (eventFilter !== undefined
+            ? ` You will only be woken by notifications tagged with one of: ` +
+              `${eventFilter.map(e => `"${e}"`).join(", ")} -- and only if the Gadget tags ` +
+              `its notifyAgents(state, {event}) calls.`
+            : ` Call unwatchGadget to stop following it.`);
   }
 
   async unwatchGadget(chatId: number, gadgetId: WorkpieceId, bindingName: string): Promise<string> {
@@ -7593,12 +7615,23 @@ export class WatchableGadget extends DurableObject {
    *  routes notifications through the platform rather than storing agent stubs in the
    *  gadget (a persisted stub revives in the gadget's isolate, which has no route back
    *  to the overseer), so this is the delivery path for kit gadgets: the watch table is
-   *  the subscription, and delivery loopbacks are minted fresh per chat. */
-  async deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown): Promise<number> {
+   *  the subscription, and delivery loopbacks are minted fresh per chat.
+   *
+   *  `event` is the optional tag the gadget attached to this notification
+   *  (notifyAgents(state, {event})). Per-watch filtering: an unfiltered watch receives
+   *  everything; a watch with an events filter receives only notifications tagged with
+   *  one of its events -- an untagged notification carries no event information, so
+   *  filtered watches skip it rather than guess. */
+  async deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown,
+                                  event?: string): Promise<number> {
     let delivered = 0;
     for (let watch of this.storage.gadgetWatches.list({})) {
       if (watch.gadgetId !== gadgetId) continue;
       if (!watch.initiator || !watch.initiatorModelId) continue;
+      if (watch.events !== undefined && watch.events.length > 0 &&
+          (event === undefined || !watch.events.includes(event))) {
+        continue;
+      }
       // Idle rows are retired by the heartbeat/turn-end upkeep; don't wake a chat
       // whose watch is about to expire.
       if (Date.now() - watch.lastActivityAt > this.#GADGET_WATCH_IDLE_MS) continue;
@@ -10241,8 +10274,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   // Gadget-worker facing (WorkshopKitLoopback): kit gadgets' notifyAgents() fan-out.
   // celld's cross-cell dispatch resolves methods on this DO class only.
-  deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown): Promise<number> {
-    return this.impl.deliverGadgetNotification(gadgetId, state);
+  deliverGadgetNotification(gadgetId: WorkpieceId, state: unknown,
+                            event?: string): Promise<number> {
+    return this.impl.deliverGadgetNotification(gadgetId, state, event);
   }
 
   // celld-port: DO-level pass-throughs for the workspace chat surface. celld's
@@ -11281,11 +11315,11 @@ type WorkshopKitLoopbackProps = {
  */
 export class WorkshopKitLoopback
     extends WorkerEntrypoint<Cloudflare.Env, WorkshopKitLoopbackProps> {
-  notifyAgentsWatching(state: unknown): Promise<number> {
+  notifyAgentsWatching(state: unknown, event?: string): Promise<number> {
     let ns = this.env.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
-    return stub.deliverGadgetNotification(this.ctx.props.gadgetId, state);
+    return stub.deliverGadgetNotification(this.ctx.props.gadgetId, state, event);
   }
 }
 

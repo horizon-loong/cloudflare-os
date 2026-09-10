@@ -1616,6 +1616,11 @@ export type GadgetWatchInfo = {
   gadgetId: WorkpieceId;
   bindingName: string;
   lastActivityAt: number;
+  /**
+   * Event filter from watchGadget's `events` parameter: when set, the chat is only
+   * woken by notifications the Gadget tagged with one of these events.
+   */
+  events?: string[];
 };
 
 export interface Overseer extends RpcTarget {
