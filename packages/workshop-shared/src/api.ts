@@ -3565,6 +3565,16 @@ export interface AiChatSubscriber {
 
   /** Delivers one provisional streaming event. Clients may ignore event types they don't support. */
   stream(chatId: number, event: AiChatStreamEvent): void;
+
+  /**
+   * A Gadget broadcast its UI state (WatchableGadget.broadcast() in its server.js). The page
+   * forwards this to that Gadget's open UI. `seq` is per-gadget and monotonically increasing;
+   * a gap between consecutive deliveries means events were lost (e.g. a reconnect), and the
+   * UI should refetch the gadget's state rather than apply the delta. Broadcasts are not
+   * replayed on resubscribe -- a reconnect surfaces as a `streamGeneration` callback, which
+   * clients also use to trigger a refetch.
+   */
+  gadgetUpdate(gadgetId: WorkpieceId, seq: number, state: unknown): void;
 }
 
 /**

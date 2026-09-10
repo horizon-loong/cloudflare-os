@@ -10,7 +10,9 @@ import {
   WorkpieceId,
   WorkpieceSummary,
 } from '@gadgets/workshop-shared/api'
+import { useCallback } from 'react'
 import GadgetUI from './GadgetUI'
+import { subscribeGadgetBroadcasts, type GadgetBroadcastEvent } from './gadgetBroadcasts'
 import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
 import TopBarNotice from './TopBarNotice'
@@ -54,6 +56,14 @@ export default function GadgetUseView({
   authenticatedApi,
   currentUserId,
 }: Props) {
+  // Platform UI broadcasts for the selected gadget, routed from the chat subscription
+  // (see gadgetBroadcasts.ts). GadgetUI forwards them into its iframe.
+  const subscribeBroadcasts = useCallback(
+    (listener: (event: GadgetBroadcastEvent) => void) => {
+      if (selectedGadgetId === null) return () => {}
+      return subscribeGadgetBroadcasts(selectedGadgetId, listener)
+    }, [selectedGadgetId])
+
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
       {/* ═══ TOP BAR ════════════════════════════════════════════════════════════ */}
@@ -152,6 +162,7 @@ export default function GadgetUseView({
             gadget={gadget}
             height="100%"
             isVisible={true}
+            subscribeBroadcasts={subscribeBroadcasts}
           />
         ) : (
           <div className="flex h-full items-center justify-center px-6 text-center">

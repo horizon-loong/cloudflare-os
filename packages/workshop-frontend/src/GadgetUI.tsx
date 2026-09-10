@@ -32,6 +32,43 @@ let gadget;  // RPC stub to the gadget's server-side Durable Object.
   gadget = newMessagePortRpcSession(port1);
 }
 
+// Platform UI broadcast channel (WatchableGadget.broadcast() in server.js): the parent
+// forwards state pushes as {type:'gadget-broadcast', seq, state} and stream restarts as
+// {type:'gadget-resync'}. Gadget code subscribes with __platform.onUpdate(fn); the shim
+// itself refetches gadget.getState() when it detects a seq gap or a resync, so a missed
+// push heals on the next delivery instead of freezing the UI.
+globalThis.__platform = (() => {
+  const handlers = new Set();
+  let lastSeq = null;
+  let refetching = false;
+  const emit = (state, seq) => {
+    for (const fn of [...handlers]) {
+      try { fn(state, seq); } catch (e) { console.error(e); }
+    }
+  };
+  const refetch = () => {
+    if (refetching || !gadget || typeof gadget.getState !== 'function') return;
+    refetching = true;
+    Promise.resolve(gadget.getState()).then(
+      (state) => { refetching = false; lastSeq = null; emit(state, null); },
+      () => { refetching = false; });
+  };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    const data = event.data;
+    if (data?.type === 'gadget-broadcast') {
+      if (typeof data.seq === 'number') {
+        if (lastSeq !== null && data.seq > lastSeq + 1) { lastSeq = data.seq; refetch(); return; }
+        lastSeq = data.seq;
+      }
+      emit(data.state, data.seq ?? null);
+    } else if (data?.type === 'gadget-resync') {
+      refetch();
+    }
+  });
+  return { onUpdate(fn) { handlers.add(fn); return () => handlers.delete(fn); } };
+})();
+
 // Monkey-patch console to forward logs to the parent frame.
 for (let level of ['debug', 'info', 'log', 'warn', 'error']) {
   let original = console[level];
@@ -125,6 +162,12 @@ interface GadgetUIProps {
   // Fires when the user presses Escape while the gadget iframe has focus. Sandboxed iframes
   // capture keydown events, so we forward Escape explicitly from inside the iframe.
   onIframeEscape?: () => void
+  // Platform UI broadcasts (WatchableGadget.broadcast() in server.js), routed from the
+  // chat subscription via the gadgetBroadcasts hub. Forwarded into the iframe as
+  // gadget-broadcast/gadget-resync messages; the injected __platform shim there delivers
+  // them to client.js via __platform.onUpdate(). Provide a stable reference (the parent
+  // should useCallback it) -- the subscription follows the prop identity.
+  subscribeBroadcasts?: (listener: (event: import('./gadgetBroadcasts').GadgetBroadcastEvent) => void) => () => void
 }
 
 // How long to wait for a UI bundle before offering a retry instead of a spinner. Not a latency
@@ -136,7 +179,7 @@ export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={props.chatId} {...props} />
 }
 
-function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
+function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, subscribeBroadcasts }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -395,6 +438,22 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
       resetConnection(new Error('Gadget RPC session was closed.'))
     }
   }, [])
+
+  // Forward platform UI broadcasts into the iframe. The shim injected into client.js
+  // listens for these (source-checked against window.parent) and delivers them to
+  // gadget code via __platform.onUpdate(), refetching state on seq gaps / resync.
+  useEffect(() => {
+    if (!subscribeBroadcasts) return
+    return subscribeBroadcasts((event) => {
+      const frameWindow = iframeRef.current?.contentWindow
+      if (!frameWindow) return
+      if (event.kind === 'update') {
+        frameWindow.postMessage({ type: 'gadget-broadcast', seq: event.seq, state: event.state }, '*')
+      } else {
+        frameWindow.postMessage({ type: 'gadget-resync' }, '*')
+      }
+    })
+  }, [subscribeBroadcasts])
 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded

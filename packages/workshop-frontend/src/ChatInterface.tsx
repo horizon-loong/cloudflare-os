@@ -14,6 +14,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { reportIssue } from './errorReporting'
+import { emitGadgetBroadcast, signalGadgetBroadcastResync } from './gadgetBroadcasts'
 import {
   Dialog,
   DropdownMenu,
@@ -3409,7 +3410,14 @@ function ChatInterface({
         for (const chatId of editPreviewListenersRef.current.keys()) resetEditPreviews(chatId);
         forceUpdate();
       }
+      // Every (re)subscription also restarts the gadget broadcast stream: pushes are not
+      // replayed, so open gadget UIs refetch their state instead of waiting for a change.
+      signalGadgetBroadcastResync();
       lastStreamGenerationRef.current = generation;
+    }
+
+    gadgetUpdate(gadgetId: number, seq: number, state: unknown) {
+      emitGadgetBroadcast(gadgetId, seq, state);
     }
 
     metadata(chat: AiChatMetadata) {

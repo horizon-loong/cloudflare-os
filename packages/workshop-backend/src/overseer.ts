@@ -1417,6 +1417,14 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      // Per-gadget monotonic sequence for UI broadcasts (see deliverGadgetBroadcast):
+      // clients detect missed pushes (reconnect windows) by seq gaps and refetch state.
+      gadgetBroadcastSeqs: collection<{ gadgetId: WorkpieceId, seq: number }>()({
+        primaryKey(entry) {
+          return keyString(entry.gadgetId);
+        }
+      }),
+
       // Model-facing snapshots of agent steps, replayed verbatim on later turns so reasoning
       // (including provider-opaque signatures) and true model provenance survive turn boundaries
       // and restarts. Stored separately from the chat messages so these payloads -- opaque and
@@ -4978,6 +4986,16 @@ export class WatchableGadget extends DurableObject {
         ? opts.event : undefined;
     return this.env.WORKSHOP.notifyAgentsWatching(state, event);
   }
+
+  // Push the current state to every open UI of this gadget. The UI receives it via
+  // __platform.onUpdate() in client.js. Delivery survives facet restarts and reconnects
+  // (the platform relays through the workspace's long-lived client sessions and the UI
+  // refetches state on gaps), so prefer this over storing browser callback stubs in
+  // server.js, which die with the isolate. Fine-grained event streams that are NOT
+  // state snapshots can still use subscribe(callback) directly.
+  async broadcast(state) {
+    return this.env.WORKSHOP.broadcastToViewers(state);
+  }
 }
 `;
 
@@ -7666,6 +7684,28 @@ export class WatchableGadget extends DurableObject {
     return delivered;
   }
 
+  /** Relay a gadget's UI broadcast (WatchableGadget.broadcast()) to every open page.
+   *  Unlike browser callback subscriptions -- which live in the gadget's own isolate and die
+   *  with every facet restart, silently freezing open UIs -- this rides the workspace's
+   *  long-lived chat sessions: the subscriber set already survives overseer restarts (pages
+   *  resubscribe) and facet restarts don't touch it at all. Each broadcast carries a
+   *  per-gadget monotonic seq; clients detect gaps (missed pushes across a reconnect) and
+   *  refetch state themselves, so no replay machinery is needed here. */
+  deliverGadgetBroadcast(gadgetId: WorkpieceId, state: unknown): void {
+    if (!this.storage.gadgets.get(gadgetId)) return;  // unknown/removed gadget: drop
+    let seqRecord = this.storage.gadgetBroadcastSeqs.get(keyString(gadgetId));
+    let seq = (seqRecord?.seq ?? 0) + 1;
+    this.storage.gadgetBroadcastSeqs.put({gadgetId, seq});
+    for (let subscriber of this.#chatSubscribers) {
+      subscriber.gadgetUpdate(gadgetId, seq, state).catch(() => {
+        // Deliberately NOT disposed on failure: an older client may simply not implement
+        // gadgetUpdate yet, and killing its chat subscription over a UI broadcast would
+        // be far worse than silently dropping pushes to it. Dead subscribers get reaped
+        // by the chat event paths when they fail there.
+      });
+    }
+  }
+
   async stopGadgetWatch(chatId: number, gadgetId: WorkpieceId): Promise<void> {
     let watch = this.storage.gadgetWatches.list({prefix: `${keyString(chatId)}.`})
         .find(w => w.gadgetId === gadgetId);
@@ -10298,6 +10338,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.deliverGadgetNotification(gadgetId, state, event);
   }
 
+  // Gadget-worker facing (WorkshopKitLoopback): kit gadgets' broadcast() UI relay.
+  deliverGadgetBroadcast(gadgetId: WorkpieceId, state: unknown): Promise<void> {
+    return Promise.resolve(this.impl.deliverGadgetBroadcast(gadgetId, state));
+  }
+
   // celld-port: DO-level pass-throughs for the workspace chat surface. celld's
   // cross-cell dispatch resolves methods on this DO class only, so the
   // workspace page's RPCs (which capnweb addresses to the returned
@@ -11339,6 +11384,13 @@ export class WorkshopKitLoopback
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
     return stub.deliverGadgetNotification(this.ctx.props.gadgetId, state, event);
+  }
+
+  broadcastToViewers(state: unknown): Promise<void> {
+    let ns = this.env.OverseerDurableObject;
+    let stub: DurableObjectStub<OverseerDurableObject> =
+        ns.get(ns.idFromString(this.ctx.props.overseerId));
+    return stub.deliverGadgetBroadcast(this.ctx.props.gadgetId, state);
   }
 }
 
