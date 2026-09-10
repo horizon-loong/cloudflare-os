@@ -4999,6 +4999,25 @@ export class WatchableGadget extends DurableObject {
 }
 `;
 
+  // Cache-busting salt for loadGadgetWorker's loader key (see its comment): a hash of
+  // everything the platform injects into a facet -- the kit module source and the reserved
+  // env binding names. Computed once per isolate; any platform change to either yields a
+  // new salt, so the next load of every gadget builds against the current platform.
+  #facetPlatformSaltCached: string | undefined;
+  #facetPlatformSalt(): string {
+    if (this.#facetPlatformSaltCached === undefined) {
+      let input = OverseerImpl.GADGET_KIT_MODULE + "|GADGET|WORKSHOP";
+      // FNV-1a: short, stable, no dependencies.
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < input.length; i++) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      this.#facetPlatformSaltCached = hash.toString(16);
+    }
+    return this.#facetPlatformSaltCached;
+  }
+
   loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number): WorkerStub {
     rpcDebugLog(`[celld-dbg] loadGadgetWorker gadgetId=${gadgetId} chatId=${chatId} LOADER=${typeof this.env.LOADER}`);
     let codeVersion = `${this.storage.codeVersion.get()}`;
@@ -5013,6 +5032,13 @@ export class WatchableGadget extends DurableObject {
       sequence = this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
       codeVersion += `.${chatId}.${sequence}`;
     }
+    // The loader's by-name cache lives as long as this cell's isolate, and in-place
+    // deployment adoption does NOT clear it -- so a facet first loaded before a platform
+    // change kept serving the old injected kit module and env bindings forever (observed
+    // live: a chat whose facet predated the broadcast() kit never relayed until a process
+    // restart). Salt the key with a hash of the platform-injected surface so any change
+    // to it rebuilds the facet on the next load.
+    codeVersion += `.${this.#facetPlatformSalt()}`;
 
     return this.env.LOADER.get(`${this.ctx.id}.${codeVersion}.${gadgetId}`, async () => {
       // The snapshot meta above serves the as-of-`sequence` doc build; this re-read only keeps
@@ -7696,6 +7722,9 @@ export class WatchableGadget extends DurableObject {
     let seqRecord = this.storage.gadgetBroadcastSeqs.get(keyString(gadgetId));
     let seq = (seqRecord?.seq ?? 0) + 1;
     this.storage.gadgetBroadcastSeqs.put({gadgetId, seq});
+    this.logger.info(`gadget broadcast seq=${seq} subscribers=${this.#chatSubscribers.size}`, {
+      event: "gadget.broadcast.relayed", gadgetId: String(gadgetId),
+    });
     for (let subscriber of this.#chatSubscribers) {
       subscriber.gadgetUpdate(gadgetId, seq, state).catch(() => {
         // Deliberately NOT disposed on failure: an older client may simply not implement

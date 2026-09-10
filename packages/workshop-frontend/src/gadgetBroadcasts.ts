@@ -30,6 +30,9 @@ export function subscribeGadgetBroadcasts(gadgetId: number, listener: Listener):
 }
 
 export function emitGadgetBroadcast(gadgetId: number, seq: number, state: unknown): void {
+  // Debug aid: inspect from the page console to see whether/what the hub delivered.
+  (globalThis as any).__gadgetBroadcasts ??= [];
+  (globalThis as any).__gadgetBroadcasts.push({gadgetId, seq, at: Date.now()});
   const listeners = listenersByGadget.get(gadgetId);
   if (!listeners) return;
   for (const listener of [...listeners]) {
